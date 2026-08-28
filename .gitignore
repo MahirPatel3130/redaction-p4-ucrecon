@@ -1,0 +1,28 @@
+# Generated redaction artifacts
+outputs/
+outputs-*/
+*.log
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets and model caches
+.env
+.env.*
+!.env.example
+.cache/
+huggingface/
+*.safetensors
+
+# Workspace/editor metadata
+.agents/
+.codex/
+.DS_Store
+.idea/
+.vscode/
+
+# Full downloaded source documents; focused CV fixtures remain tracked
+samples/**/source_original.pdf
