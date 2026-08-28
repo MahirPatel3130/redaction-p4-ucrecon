@@ -40,8 +40,9 @@ applications/
     └── recommendation_1.pdf
 ```
 
-Each application directory must contain exactly one matching `CV.pdf` or
-`curriculum_vitae.pdf` filename variant. The script processes that CV only; recommendation
+Each application directory must contain exactly one PDF whose filename contains `CV` or
+`curriculum vitae`, case-insensitively. Names such as `CV.pdf`, `Applicant_CV_2025.pdf`, and
+`smith-curriculum-vitae.pdf` are accepted. The script processes that CV only; recommendation
 letters and unrelated PDFs beside it are ignored. Applications with no matching CV or multiple
 matching CVs are logged and skipped rather than guessed. Nested directories below an application
 directory are not searched.

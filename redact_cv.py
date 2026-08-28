@@ -16,7 +16,7 @@ from typing import Any
 
 
 MODEL_DEFAULT = "google/gemma-4-31B-it"
-CV_NAME = re.compile(r"^(?:cv|curriculum[_ -]?vitae)\.pdf$", re.IGNORECASE)
+CV_NAME = re.compile(r"(?:cv|curriculum[_ -]?vitae)", re.IGNORECASE)
 CATEGORIES = {
     "applicant_name", "email", "phone_number", "website", "address",
     "coauthor_identity", "reference_identity", "publication_information",
@@ -407,7 +407,7 @@ def find_cvs(root: Path) -> list[Path]:
     for application_dir in application_dirs:
         matches = sorted(
             p for p in application_dir.iterdir()
-            if p.is_file() and CV_NAME.fullmatch(p.name)
+            if p.is_file() and p.suffix.lower() == ".pdf" and CV_NAME.search(p.stem)
         )
         relative = application_dir.relative_to(root)
         if not matches:
