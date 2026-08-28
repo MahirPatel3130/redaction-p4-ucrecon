@@ -401,7 +401,24 @@ def clean_json_inventory(source: Path, response_path: Path, model: str) -> dict[
 
 
 def find_cvs(root: Path) -> list[Path]:
-    return sorted(p for p in root.rglob("*") if p.is_file() and CV_NAME.fullmatch(p.name))
+    """Find exactly one CV directly inside each immediate application directory."""
+    application_dirs = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    sources = []
+    for application_dir in application_dirs:
+        matches = sorted(
+            p for p in application_dir.iterdir()
+            if p.is_file() and CV_NAME.fullmatch(p.name)
+        )
+        relative = application_dir.relative_to(root)
+        if not matches:
+            logging.warning("Skipping application without a matching CV: %s", relative)
+            continue
+        if len(matches) > 1:
+            logging.error("Skipping application with multiple matching CVs: %s count=%d",
+                          relative, len(matches))
+            continue
+        sources.append(matches[0])
+    return sources
 
 
 def extract_json(raw: str) -> dict[str, Any]:
@@ -770,7 +787,10 @@ def main() -> int:
     if input_root == output_root or input_root in output_root.parents:
         logging.error("Output root must not be the input root or nested inside it"); return 2
     sources = find_cvs(input_root)
-    if not sources: logging.warning("No matching CV PDFs found under %s", input_root); return 0
+    if not sources:
+        logging.warning("No application folders containing exactly one matching CV found under %s",
+                        input_root)
+        return 0
     output_root.mkdir(parents=True, exist_ok=True)
     aggregate = {}
     if args.reuse_model_responses_from:

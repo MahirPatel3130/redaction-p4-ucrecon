@@ -26,9 +26,25 @@ HF_HUB_OFFLINE=1 python redact_cv.py \
 ```
 
 The script defaults to `google/gemma-4-31B-it`, loads it once with automatic device placement,
-and accepts `--model` for testing with another compatible Gemma vision checkpoint. It processes
-only `CV.pdf` and `curriculum_vitae.pdf` naming variants, recursively. Recommendation letters and
-other PDFs are ignored.
+and accepts `--model` for testing with another compatible Gemma vision checkpoint. Set
+`--input-root` to the directory whose immediate child directories are individual applications:
+
+```text
+applications/
+├── application_001/
+│   ├── CV.pdf
+│   ├── recommendation_1.pdf
+│   └── recommendation_2.pdf
+└── application_002/
+    ├── curriculum_vitae.pdf
+    └── recommendation_1.pdf
+```
+
+Each application directory must contain exactly one matching `CV.pdf` or
+`curriculum_vitae.pdf` filename variant. The script processes that CV only; recommendation
+letters and unrelated PDFs beside it are ignored. Applications with no matching CV or multiple
+matching CVs are logged and skipped rather than guessed. Nested directories below an application
+directory are not searched.
 
 For entity-inventory work without PDF generation, use `--json-only`. The resulting JSON includes
 PDF-grounded values, canonical entities with aliases and occurrences, per-category coverage,
