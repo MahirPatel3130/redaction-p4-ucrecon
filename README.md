@@ -75,6 +75,33 @@ tmux new-session -d -s cv-redaction \
    > redaction-v2.log 2>&1'
 ```
 
+## Recommendation letters
+
+`redact_recommendation_letters.py` is a separate direct-identifier workflow and does not change
+the CV output format. Point `--input-root` at the same applications directory. Each immediate
+application folder must contain exactly three non-CV PDFs; folders with another count are recorded
+as `invalid_letter_count` and skipped.
+
+JSON is the default output:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python redact_recommendation_letters.py \
+  --input-root /protected/applications \
+  --output-root /protected/recommendation-results
+```
+
+Add `--write-redacted-pdfs` to also create permanently black-redacted PDFs. The script detects
+person names, emails, phone/fax numbers, websites, postal addresses, explicit personal IDs, and
+signatures. It intentionally preserves standalone institutions, departments, titles, dates,
+publications, logos, and evaluation prose.
+
+Each letter receives a JSON file, and `recommendation_redactions.json` groups all documents by
+application. Stable application/document IDs, application-local applicant IDs, document-local
+recommender IDs, and `person_id: null` fields make the schema ready for a later protected identity
+resolution step without attempting cross-application matching now. All output JSON remains P4
+sensitive because it contains the detected values. Use `--debug-artifacts` only when protected raw
+Gemma responses are needed for diagnosis.
+
 ## Public sample PDFs
 
 The files under `samples/` come from public university career guides containing fictional or
