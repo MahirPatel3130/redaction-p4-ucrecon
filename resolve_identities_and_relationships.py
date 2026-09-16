@@ -252,8 +252,8 @@ def party_id_for_reference(document_id: str, entity: dict[str, Any]) -> str:
     return f"{document_id}:reference:{hashlib.sha256(anchor.encode()).hexdigest()[:10]}"
 
 
-def make_grouping_candidate(contact_local_id: str, anchor_id: str | None,
-                            entity: dict[str, Any]) -> dict[str, Any]:
+def make_grouping_candidate(document_id: str, contact_local_id: str,
+                            anchor_id: str | None, entity: dict[str, Any]) -> dict[str, Any]:
     right = anchor_id or "no_candidate_anchor"
     candidate_id = stable_id("match", f"reference_grouping|{contact_local_id}|{right}")
     return {
@@ -408,10 +408,10 @@ def collect_parties(cv: dict[str, Any], recommendations: dict[str, Any]) -> tupl
             possible_anchors = candidates or [anchor["local_person_id"] for anchor in anchors]
             if possible_anchors:
                 grouping_candidates.extend(make_grouping_candidate(
-                    local_id, anchor_id, entity) for anchor_id in possible_anchors)
+                    doc_id, local_id, anchor_id, entity) for anchor_id in possible_anchors)
             else:
                 grouping_candidates.append(make_grouping_candidate(
-                    local_id, None, entity))
+                    doc_id, local_id, None, entity))
     return parties, relationship_seeds, grouping_candidates
 
 
