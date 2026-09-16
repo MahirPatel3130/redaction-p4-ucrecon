@@ -39,8 +39,10 @@ REVIEW_COLUMNS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cv-json", type=Path, required=True)
-    parser.add_argument("--recommendation-json", type=Path, required=True)
+    parser.add_argument("--cv-json", type=Path, action="append", required=True,
+                        help="CV aggregate JSON; repeat for additional batches")
+    parser.add_argument("--recommendation-json", type=Path, action="append", required=True,
+                        help="Recommendation aggregate JSON; repeat for additional batches")
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--decisions-csv", type=Path)
@@ -296,6 +298,27 @@ def validate_aggregate(value: dict[str, Any], label: str) -> None:
             raise ValueError(f"Document key/path mismatch in {label}")
         if stable_id("doc", Path(key).as_posix()) != doc_id:
             raise ValueError(f"Invalid {label} document_id")
+
+
+def merge_aggregates(paths: list[Path], label: str) -> dict[str, Any]:
+    combined: dict[str, Any] = {"schema_version": SCHEMA_VERSION,
+                                "applications": {}, "documents": {}}
+    seen_paths: set[Path] = set()
+    for path in paths:
+        if path in seen_paths:
+            raise ValueError(f"Duplicate {label} aggregate path")
+        seen_paths.add(path)
+        aggregate = read_json(path)
+        validate_aggregate(aggregate, label)
+        duplicate_apps = set(combined["applications"]) & set(aggregate["applications"])
+        duplicate_documents = set(combined["documents"]) & set(aggregate["documents"])
+        if duplicate_apps:
+            raise ValueError(f"Duplicate {label} application IDs across aggregates")
+        if duplicate_documents:
+            raise ValueError(f"Duplicate {label} document paths across aggregates")
+        combined["applications"].update(aggregate["applications"])
+        combined["documents"].update(aggregate["documents"])
+    return combined
 
 
 def collect_parties(cv: dict[str, Any], recommendations: dict[str, Any]) -> tuple[
@@ -571,25 +594,64 @@ def apply_decisions(registry: dict[str, Any], decisions: list[dict[str, str]]) -
     registry["rejected_candidates"] = sorted(rejected)
 
 
-def auto_merge_strong(registry: dict[str, Any], parties: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def representative_local_id(registry: dict[str, Any], person_id: str) -> str:
+    person_id = active_person_id(registry, person_id)
+    local_ids = registry["persons"][person_id].get("local_person_ids", [])
+    if not local_ids:
+        raise ValueError("Registry person has no local parties")
+    return sorted(local_ids)[0]
+
+
+def auto_merge_strong(registry: dict[str, Any], parties: dict[str, dict[str, Any]],
+                      preexisting_person_ids: set[str]) -> list[dict[str, Any]]:
     by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
     local_by_key: dict[tuple[str, str], set[str]] = defaultdict(set)
-    for local_id, party in parties.items():
-        person_id = active_person_id(registry, registry["local_party_index"][local_id])
-        for item in party["identifiers"]:
+    current_person_ids = {person_for_local(registry, local_id) for local_id in parties}
+    preexisting_active = {active_person_id(registry, person_id)
+                          for person_id in preexisting_person_ids
+                          if person_id in registry["persons"]}
+    for person_id, person in registry["persons"].items():
+        if person.get("status") != "active":
+            continue
+        for item in person.get("identifiers", []):
             if item["identifier_type"] in STRONG_TYPES and item["verified"]:
                 key = (item["identifier_type"], item["normalized_value"])
                 by_key[key].add(person_id)
-                local_by_key[key].add(local_id)
-    conflicts = []
+    for local_id, party in parties.items():
+        for item in party["identifiers"]:
+            if item["identifier_type"] in STRONG_TYPES and item["verified"]:
+                local_by_key[(item["identifier_type"], item["normalized_value"])].add(local_id)
+
+    blocked_keys: set[tuple[str, str]] = set()
+    conflicts: list[dict[str, Any]] = []
+    keys_by_current_person: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for key, person_ids in by_key.items():
+        for person_id in person_ids & current_person_ids:
+            keys_by_current_person[person_id].add(key)
+        historical = {value for value in person_ids if value in preexisting_active}
+        if len(historical) > 1 and person_ids & current_person_ids:
+            blocked_keys.add(key)
+
+    for current_id, keys in keys_by_current_person.items():
+        historical_targets = {value for key in keys for value in by_key[key]
+                              if value in preexisting_active and value != current_id}
+        if len(historical_targets) > 1:
+            blocked_keys.update(keys)
+
+    for key in sorted(blocked_keys):
+        active_ids = sorted({active_person_id(registry, value) for value in by_key[key]})
+        local_ids = sorted(local_by_key[key])
+        for person_id in active_ids:
+            representative = representative_local_id(registry, person_id)
+            if representative not in local_ids:
+                local_ids.append(representative)
+        conflicts.append({"key": key, "person_ids": active_ids,
+                          "local_ids": sorted(local_ids)})
+
     for key, person_ids in sorted(by_key.items()):
-        active_ids = {active_person_id(registry, value) for value in person_ids}
-        established = {person_id for person_id in active_ids
-                       if len(registry["persons"][person_id].get("local_person_ids", [])) > 1}
-        if len(established) > 1:
-            conflicts.append({"key": key, "person_ids": sorted(active_ids),
-                              "local_ids": sorted(local_by_key[key])})
+        if key in blocked_keys or not (person_ids & current_person_ids):
             continue
+        active_ids = {active_person_id(registry, value) for value in person_ids}
         merge_people(registry, active_ids, f"exact_verified_{key[0]}", stable_id("evidence", "|".join(key)))
     return conflicts
 
@@ -617,16 +679,38 @@ def candidate_from_parties(candidate_type: str, left: dict[str, Any], right: dic
             "confidence": round(confidence, 3), "conflicts": conflicts or []}
 
 
+def registry_party_views(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    views = {}
+    for person_id, person in registry["persons"].items():
+        if person.get("status") != "active":
+            continue
+        local_id = representative_local_id(registry, person_id)
+        views[local_id] = {
+            "local_person_id": local_id,
+            "roles": set(person.get("roles", [])),
+            "application_ids": set(person.get("application_ids", [])),
+            "document_ids": set(person.get("document_ids", [])),
+            "identifiers": list(person.get("identifiers", [])),
+            "entity_ids": set(), "source": "identity_registry",
+        }
+    return views
+
+
 def generate_review_candidates(registry: dict[str, Any], parties: dict[str, dict[str, Any]],
                                grouping: list[dict[str, Any]],
                                strong_conflicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = list(grouping)
-    local_ids = sorted(parties)
+    comparison_parties = registry_party_views(registry)
+    local_ids = sorted(comparison_parties)
+    current_person_ids = {person_for_local(registry, local_id) for local_id in parties}
     for index, left_id in enumerate(local_ids):
-        left = parties[left_id]
+        left = comparison_parties[left_id]
         for right_id in local_ids[index + 1:]:
-            right = parties[right_id]
+            right = comparison_parties[right_id]
             if person_for_local(registry, left_id) == person_for_local(registry, right_id):
+                continue
+            if (person_for_local(registry, left_id) not in current_person_ids
+                    and person_for_local(registry, right_id) not in current_person_ids):
                 continue
             signals, values, scores = [], [], []
             for left_item in left["identifiers"]:
@@ -658,13 +742,19 @@ def generate_review_candidates(registry: dict[str, Any], parties: dict[str, dict
                     max(scores)))
     for conflict in strong_conflicts:
         local = conflict["local_ids"]
-        pair = next(((left_id, right_id) for index, left_id in enumerate(local)
-                     for right_id in local[index + 1:]
-                     if person_for_local(registry, left_id) != person_for_local(registry, right_id)),
+        pair = next(((left_id, right_id) for left_id in local if left_id in parties
+                     for right_id in local if left_id != right_id
+                     and person_for_local(registry, left_id) != person_for_local(registry, right_id)),
                     None)
         if pair is None:
+            pair = next(((left_id, right_id) for index, left_id in enumerate(local)
+                         for right_id in local[index + 1:]
+                         if person_for_local(registry, left_id) != person_for_local(registry, right_id)),
+                        None)
+        if pair is None:
             continue
-        left, right = parties[pair[0]], parties[pair[1]]
+        left = parties.get(pair[0]) or comparison_parties[pair[0]]
+        right = parties.get(pair[1]) or comparison_parties[pair[1]]
         kind, raw_key = conflict["key"]
         candidates.append(candidate_from_parties(
             "strong_identifier_conflict", left, right, [f"conflicting_{kind}"],
@@ -754,11 +844,14 @@ def combined_catalog(cv: dict[str, Any], recommendations: dict[str, Any]) -> tup
 
 def review_rows(candidates: list[dict[str, Any]], parties: dict[str, dict[str, Any]],
                 registry: dict[str, Any]) -> list[dict[str, Any]]:
+    registry_views = registry_party_views(registry)
     rows = []
     for item in candidates:
         left_ids, right_ids = item.get("left_local_ids", []), item.get("right_local_ids", [])
-        left_parties = [parties[value] for value in left_ids if value in parties]
-        right_parties = [parties[value] for value in right_ids if value in parties]
+        left_parties = [parties.get(value) or registry_views.get(value) for value in left_ids]
+        right_parties = [parties.get(value) or registry_views.get(value) for value in right_ids]
+        left_parties = [value for value in left_parties if value]
+        right_parties = [value for value in right_parties if value]
         left_people = sorted({person_for_local(registry, value) for value in left_ids
                               if value in registry["local_party_index"]})
         right_people = sorted({person_for_local(registry, value) for value in right_ids
@@ -815,7 +908,7 @@ def emit_outputs(output_root: Path, run_id: str, status: str,
                  applications: list[dict[str, Any]], documents: list[dict[str, Any]],
                  people: list[dict[str, Any]], parties: dict[str, dict[str, Any]],
                  registry: dict[str, Any], relationships: list[dict[str, Any]],
-                 candidates: list[dict[str, Any]], input_checksums: dict[str, str]) -> None:
+                 candidates: list[dict[str, Any]], input_checksums: dict[str, Any]) -> None:
     restricted = output_root / "restricted"
     researcher = output_root / "researcher"
     rows = review_rows(candidates, parties, registry)
@@ -873,38 +966,42 @@ def main() -> int:
     args = parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
     started = time.monotonic()
-    cv_path = args.cv_json.resolve()
-    recommendation_path = args.recommendation_json.resolve()
+    cv_paths = [path.resolve() for path in args.cv_json]
+    recommendation_paths = [path.resolve() for path in args.recommendation_json]
     registry_path = args.registry.resolve()
     output_root = args.output_root.resolve()
-    for path, label in ((cv_path, "CV aggregate"),
-                        (recommendation_path, "recommendation aggregate")):
+    labeled_paths = ([(path, "CV aggregate") for path in cv_paths]
+                     + [(path, "recommendation aggregate") for path in recommendation_paths])
+    for path, label in labeled_paths:
         if not path.is_file():
             logging.error("Missing %s path=%s", label, path)
             return 2
     if output_root.exists() and (not output_root.is_dir() or any(output_root.iterdir())):
         logging.error("Output directory must be new or empty path=%s", output_root)
         return 2
-    input_directories = {cv_path.parent, recommendation_path.parent}
+    input_directories = {path.parent for path in cv_paths + recommendation_paths}
     if (output_root == registry_path.parent or output_root in registry_path.parents
             or output_root in input_directories
             or any(directory in output_root.parents for directory in input_directories)):
         logging.error("Output directory must be separate from inputs and registry")
         return 2
     try:
-        cv = read_json(cv_path)
-        recommendations = read_json(recommendation_path)
-        validate_aggregate(cv, "CV")
-        validate_aggregate(recommendations, "recommendation")
-        input_checksums = {"cv_json_sha256": file_sha256(cv_path),
-                           "recommendation_json_sha256": file_sha256(recommendation_path)}
+        cv = merge_aggregates(cv_paths, "CV")
+        recommendations = merge_aggregates(recommendation_paths, "recommendation")
+        input_checksums = {
+            "cv_json_sha256": [file_sha256(path) for path in cv_paths],
+            "recommendation_json_sha256": [file_sha256(path) for path in recommendation_paths],
+        }
         applications, documents = combined_catalog(cv, recommendations)
         parties, seeds, grouping = collect_parties(cv, recommendations)
         registry = load_registry(registry_path)
+        preexisting_person_ids = {person_id for person_id, person in registry["persons"].items()
+                                  if person.get("status") == "active"}
         ensure_persons(registry, parties)
         decisions = parse_decisions(args.decisions_csv.resolve() if args.decisions_csv else None)
         apply_decisions(registry, decisions)
-        strong_conflicts = auto_merge_strong(registry, parties)
+        strong_conflicts = auto_merge_strong(
+            registry, parties, preexisting_person_ids)
         candidates = generate_review_candidates(registry, parties, grouping, strong_conflicts)
         relationships = build_relationships(seeds, registry)
         people = active_research_people(registry, parties)
@@ -918,9 +1015,9 @@ def main() -> int:
     except (csv.Error, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         logging.error("Resolution failed error=%s", type(exc).__name__)
         return 2
-    logging.info("Resolution completed applications=%d documents=%d people=%d relationships=%d pending_review=%d seconds=%.1f",
-                 len(applications), len(documents), len(people), len(relationships),
-                 len(candidates), time.monotonic() - started)
+    logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d pending_review=%d seconds=%.1f",
+                 len(cv_paths), len(recommendation_paths), len(applications), len(documents),
+                 len(people), len(relationships), len(candidates), time.monotonic() - started)
     return 0
 
 

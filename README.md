@@ -140,6 +140,26 @@ optional `reviewer_note`, and run the same command with a new output directory a
 --decisions-csv /protected/project_run/03_identity_resolution/run_001/restricted/review_queue.csv
 ```
 
+For multiple disjoint batches, repeat both aggregate options. Application folders must be unique
+across batches; the resolver rejects duplicate application or document IDs and produces one
+combined dataset:
+
+```bash
+python resolve_identities_and_relationships.py \
+  --cv-json /protected/output_1795_upgraded/cv_redactions.json \
+  --cv-json /protected/output_1796_upgraded/cv_redactions.json \
+  --cv-json /protected/output_1801_upgraded/cv_redactions.json \
+  --recommendation-json /protected/recommendation_1795/recommendation_redactions.json \
+  --recommendation-json /protected/recommendation_1796/recommendation_redactions.json \
+  --recommendation-json /protected/recommendation_1801/recommendation_redactions.json \
+  --registry /protected/relationship_state/identity_registry.json \
+  --output-root /protected/relationship_results/run_001
+```
+
+The same protected registry may also be reused for a later incremental batch. Strong verified
+identifiers in the new batch are compared with active people already stored in the registry, so
+previous person IDs remain stable across runs.
+
 The `restricted/` directory and registry remain P4-sensitive because they contain raw identity
 evidence. The `researcher/` directory contains a de-identified graph in canonical `dataset.json`
 plus `applications.csv`, `documents.csv`, `people.csv`, and `relationships.csv`. It supports
