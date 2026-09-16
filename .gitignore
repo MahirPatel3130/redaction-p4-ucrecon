@@ -1,6 +1,11 @@
 # Generated redaction artifacts
 outputs/
 outputs-*/
+project_run/
+relationship-results*/
+identity_registry.json
+review_queue.csv
+decisions.csv
 *.log
 
 # Python caches and local environments

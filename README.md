@@ -117,6 +117,45 @@ resolution step without attempting cross-application matching now. All output JS
 sensitive because it contains the detected values. Use `--debug-artifacts` only when protected raw
 Gemma responses are needed for diagnosis.
 
+## Direct-person identity resolution
+
+After both JSON inventories are complete, run the CPU-only resolver. It does not load Gemma, read
+source PDFs, or modify either redaction output:
+
+```bash
+python resolve_identities_and_relationships.py \
+  --cv-json /protected/project_run/01_cv_redaction/cv_redactions.json \
+  --recommendation-json /protected/project_run/02_letter_redaction/recommendation_redactions.json \
+  --registry /protected/relationship_state/identity_registry.json \
+  --output-root /protected/project_run/03_identity_resolution/run_001
+```
+
+The persistent registry assigns opaque `person_...` IDs. Exact PDF-verified email and unique-ID
+matches merge automatically. Names, phones, websites, ambiguous CV-reference contact grouping,
+and identifier conflicts are written to `restricted/review_queue.csv`; they never merge
+automatically. An authorized reviewer may set `decision` to `accept`, `reject`, or `defer`, add an
+optional `reviewer_note`, and run the same command with a new output directory and:
+
+```bash
+--decisions-csv /protected/project_run/03_identity_resolution/run_001/restricted/review_queue.csv
+```
+
+The `restricted/` directory and registry remain P4-sensitive because they contain raw identity
+evidence. The `researcher/` directory contains a de-identified graph in canonical `dataset.json`
+plus `applications.csv`, `documents.csv`, `people.csv`, and `relationships.csv`. It supports
+`wrote_recommendation_for` and `listed_as_reference_by`. If review candidates remain, uncertain
+people stay separate and the package status is `ready_with_pending_review`; otherwise it is
+`ready`. Stable pseudonymous IDs are still linkable data, so the researcher package remains a
+controlled research dataset even though it excludes direct identifiers.
+
+Every resolution run must use a new or empty output directory. Keep the registry at a stable,
+access-controlled path so person IDs and accepted/rejected decisions survive later runs. The v1
+resolver intentionally excludes publications, authorship, advisors, and committee relationships.
+
+Example researcher questions include grouping `relationships.csv` by `subject_person_id` to find
+one recommender connected to multiple applicants, or selecting people who occur as both a
+`recommender` and `reference` after protected identity resolution.
+
 ## Public sample PDFs
 
 The files under `samples/` come from public university career guides containing fictional or
