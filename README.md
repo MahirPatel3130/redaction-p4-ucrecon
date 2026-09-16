@@ -131,10 +131,15 @@ python resolve_identities_and_relationships.py \
 ```
 
 The persistent registry assigns opaque `person_...` IDs. Exact PDF-verified email and unique-ID
-matches merge automatically. Names, phones, websites, ambiguous CV-reference contact grouping,
-and identifier conflicts are written to `restricted/review_queue.csv`; they never merge
-automatically. An authorized reviewer may set `decision` to `accept`, `reject`, or `defer`, add an
-optional `reviewer_note`, and run the same command with a new output directory and:
+matches merge automatically at confidence `1.0`. The balanced automatic tier also links exact
+full names, valid phone numbers, and personal/profile URLs at lower recorded confidence. Fuzzy
+names require supporting phone or eligible URL evidence. Bare institutional domains, addresses,
+fuzzy names alone, ambiguous CV-reference grouping, and hard identifier conflicts never merge.
+
+`restricted/review_queue.csv` retains those exceptional cases as optional advisories; it does not
+block delivery. If an authorized reviewer later chooses to adjudicate one, they may set `decision`
+to `accept`, `reject`, or `defer`, add an optional `reviewer_note`, and run with a new output
+directory and:
 
 ```bash
 --decisions-csv /protected/project_run/03_identity_resolution/run_001/restricted/review_queue.csv
@@ -161,12 +166,18 @@ identifiers in the new batch are compared with active people already stored in t
 previous person IDs remain stable across runs.
 
 The `restricted/` directory and registry remain P4-sensitive because they contain raw identity
-evidence. The `researcher/` directory contains a de-identified graph in canonical `dataset.json`
-plus `applications.csv`, `documents.csv`, `people.csv`, and `relationships.csv`. It supports
-`wrote_recommendation_for` and `listed_as_reference_by`. If review candidates remain, uncertain
-people stay separate and the package status is `ready_with_pending_review`; otherwise it is
-`ready`. Stable pseudonymous IDs are still linkable data, so the researcher package remains a
-controlled research dataset even though it excludes direct identifiers.
+evidence. `automatic_matches.csv` audits every automatic merge and its confidence. The
+`researcher/` directory contains a de-identified graph in canonical `dataset.json` plus
+`applications.csv`, `documents.csv`, `people.csv`, `relationships.csv`, and
+`repeat_recommenders.csv`. It supports `wrote_recommendation_for` and
+`listed_as_reference_by`. The researcher package is always `ready` with `review_required: false`;
+any unresolved cases are reported only as `advisory_count` and remain separate.
+
+People records include identity-linkage confidence, recommendation-letter count, distinct
+applicants recommended, and `is_repeat_recommender`. A repeat recommender is a resolved person
+connected by recommendation letters to at least two distinct applicant person IDs; multiple
+letters for one applicant count once. Stable pseudonymous IDs remain linkable data, so the
+researcher package is still a controlled dataset even though it excludes direct identifiers.
 
 Every resolution run must use a new or empty output directory. Keep the registry at a stable,
 access-controlled path so person IDs and accepted/rejected decisions survive later runs. The v1

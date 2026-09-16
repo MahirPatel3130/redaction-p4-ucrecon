@@ -26,6 +26,7 @@ SUCCESS_STATUSES = {"completed", "json_completed"}
 STRONG_TYPES = {"email", "unique_identifier"}
 REVIEW_TYPES = {"person_name", "phone_number", "website"}
 IDENTITY_TYPES = REVIEW_TYPES | STRONG_TYPES | {"postal_address"}
+BALANCED_CONFIDENCE = {"person_name": 0.80, "phone_number": 0.90, "website": 0.88}
 DECISIONS = {"accept", "reject", "defer"}
 CV_REFERENCE_CONTACTS = {"email", "phone_number", "website", "postal_address"}
 HONORIFICS = re.compile(r"(?i)\b(?:dr|prof|professor|mr|mrs|ms|ph\.?d)\.?\b")
@@ -452,7 +453,7 @@ def create_person(registry: dict[str, Any], local_id: str) -> str:
         "person_id": person_id, "status": "active", "created_at": now_utc(),
         "merged_into": None, "local_person_ids": [local_id], "roles": [],
         "application_ids": [], "document_ids": [], "identifiers": [],
-        "resolution_methods": ["singleton"],
+        "resolution_methods": ["singleton"], "identity_linkage_confidence": 1.0,
     }
     registry["local_party_index"][local_id] = person_id
     return person_id
@@ -469,6 +470,7 @@ def ensure_persons(registry: dict[str, Any], parties: dict[str, dict[str, Any]])
         else:
             person_id = create_person(registry, local_id)
         person = registry["persons"][person_id]
+        person.setdefault("identity_linkage_confidence", 1.0)
         party = parties[local_id]
         person["local_person_ids"] = sorted(set(person["local_person_ids"]) | {local_id})
         person["roles"] = sorted(set(person["roles"]) | party["roles"])
@@ -485,7 +487,8 @@ def ensure_persons(registry: dict[str, Any], parties: dict[str, dict[str, Any]])
 
 
 def merge_people(registry: dict[str, Any], person_ids: Iterable[str], method: str,
-                 evidence: str) -> str:
+                 evidence: str, confidence: float = 1.0,
+                 evidence_type: str | None = None) -> str:
     active_ids = sorted({active_person_id(registry, person_id) for person_id in person_ids})
     if not active_ids:
         raise ValueError("Cannot merge an empty person set")
@@ -494,6 +497,8 @@ def merge_people(registry: dict[str, Any], person_ids: Iterable[str], method: st
     canonical = min(active_ids, key=lambda person_id: (
         registry["persons"][person_id].get("created_at", ""), person_id))
     target = registry["persons"][canonical]
+    target["identity_linkage_confidence"] = min(
+        float(target.get("identity_linkage_confidence", 1.0)), confidence)
     for retired_id in active_ids:
         if retired_id == canonical:
             continue
@@ -511,10 +516,15 @@ def merge_people(registry: dict[str, Any], person_ids: Iterable[str], method: st
                 existing.add(key)
         retired["status"] = "retired"
         retired["merged_into"] = canonical
+        target["identity_linkage_confidence"] = min(
+            float(target.get("identity_linkage_confidence", 1.0)),
+            float(retired.get("identity_linkage_confidence", 1.0)), confidence)
         for local_id in retired.get("local_person_ids", []):
             registry["local_party_index"][local_id] = canonical
         registry["merges"].append({"retired_person_id": retired_id,
                                     "surviving_person_id": canonical, "method": method,
+                                    "confidence": confidence,
+                                    "evidence_type": evidence_type or method,
                                     "evidence": evidence, "timestamp": now_utc()})
     target["resolution_methods"] = sorted(set(target["resolution_methods"]) | {method})
     return canonical
@@ -652,7 +662,8 @@ def auto_merge_strong(registry: dict[str, Any], parties: dict[str, dict[str, Any
         if key in blocked_keys or not (person_ids & current_person_ids):
             continue
         active_ids = {active_person_id(registry, value) for value in person_ids}
-        merge_people(registry, active_ids, f"exact_verified_{key[0]}", stable_id("evidence", "|".join(key)))
+        merge_people(registry, active_ids, f"exact_verified_{key[0]}",
+                     stable_id("evidence", "|".join(key)), 1.0, key[0])
     return conflicts
 
 
@@ -679,6 +690,142 @@ def candidate_from_parties(candidate_type: str, left: dict[str, Any], right: dic
             "confidence": round(confidence, 3), "conflicts": conflicts or []}
 
 
+def meaningful_full_name(value: str) -> bool:
+    tokens = [token for token in normalize("person_name", value).split() if len(token) >= 2]
+    return len(tokens) >= 2
+
+
+def eligible_personal_url(value: str) -> bool:
+    normalized = normalize("website", value)
+    return "/" in normalized and len(normalized.split("/", 1)[1].strip("/")) >= 2
+
+
+def matching_evidence(left: dict[str, Any], right: dict[str, Any]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    seen = set()
+    for left_item in left["identifiers"]:
+        if left_item["identifier_type"] not in REVIEW_TYPES:
+            continue
+        for right_item in right["identifiers"]:
+            if left_item["identifier_type"] != right_item["identifier_type"]:
+                continue
+            kind = left_item["identifier_type"]
+            left_value, right_value = left_item["normalized_value"], right_item["normalized_value"]
+            if not left_value or not right_value:
+                continue
+            signal, confidence, auto_eligible = "", 0.0, False
+            if left_value == right_value:
+                signal = f"exact_{kind}"
+                confidence = BALANCED_CONFIDENCE[kind]
+                if kind == "person_name":
+                    auto_eligible = (meaningful_full_name(left_item["value"])
+                                     and meaningful_full_name(right_item["value"]))
+                elif kind == "phone_number":
+                    auto_eligible = len(left_value) >= 10
+                elif kind == "website":
+                    auto_eligible = (eligible_personal_url(left_item["value"])
+                                     and eligible_personal_url(right_item["value"]))
+            elif kind == "person_name":
+                left_surname, left_initial = name_parts(left_item["value"])
+                right_surname, right_initial = name_parts(right_item["value"])
+                ratio = difflib.SequenceMatcher(None, left_value, right_value).ratio()
+                if (left_surname and left_surname == right_surname
+                        and left_initial == right_initial and ratio >= 0.94):
+                    signal = "high_similarity_person_name"
+                    confidence = 0.72
+            if not signal:
+                continue
+            key = (signal, left_value, right_value)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append({"signal": signal, "identifier_type": kind,
+                            "left_value": left_item["value"],
+                            "right_value": right_item["value"],
+                            "confidence": confidence, "auto_eligible": auto_eligible})
+    return matches
+
+
+def verified_unique_values(party: dict[str, Any]) -> set[str]:
+    return {item["normalized_value"] for item in party["identifiers"]
+            if item["identifier_type"] == "unique_identifier" and item["verified"]
+            and item["normalized_value"]}
+
+
+def pair_candidate(left: dict[str, Any], right: dict[str, Any],
+                   evidence: list[dict[str, Any]], candidate_type: str = "identity_match",
+                   conflicts: list[str] | None = None) -> dict[str, Any]:
+    return candidate_from_parties(
+        candidate_type, left, right,
+        [item["signal"] for item in evidence],
+        list(dict.fromkeys(value for item in evidence
+                           for value in (item["left_value"], item["right_value"]))),
+        max((item["confidence"] for item in evidence), default=0.0),
+        "high" if conflicts else "medium", conflicts)
+
+
+def auto_merge_balanced(registry: dict[str, Any], parties: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    views = registry_party_views(registry)
+    local_ids = sorted(views)
+    current_person_ids = {person_for_local(registry, local_id) for local_id in parties}
+    proposals: list[tuple[float, dict[str, Any], list[dict[str, Any]]]] = []
+    advisories: list[dict[str, Any]] = []
+    rejected = set(registry["rejected_candidates"])
+    for index, left_id in enumerate(local_ids):
+        left = views[left_id]
+        for right_id in local_ids[index + 1:]:
+            right = views[right_id]
+            left_person = person_for_local(registry, left_id)
+            right_person = person_for_local(registry, right_id)
+            if left_person == right_person:
+                continue
+            if left_person not in current_person_ids and right_person not in current_person_ids:
+                continue
+            evidence = matching_evidence(left, right)
+            if not evidence:
+                continue
+            candidate = pair_candidate(left, right, evidence)
+            if candidate["candidate_id"] in rejected:
+                continue
+            left_unique, right_unique = verified_unique_values(left), verified_unique_values(right)
+            if left_unique and right_unique and left_unique.isdisjoint(right_unique):
+                advisories.append(pair_candidate(
+                    left, right, evidence, "strong_identifier_conflict",
+                    ["different_verified_unique_identifiers"]))
+                continue
+            eligible = [item for item in evidence if item["auto_eligible"]]
+            has_supported_fuzzy = (any(item["signal"] == "high_similarity_person_name"
+                                       for item in evidence)
+                                   and any(item["identifier_type"] in {"phone_number", "website"}
+                                           and item["auto_eligible"] for item in evidence))
+            if not eligible and not has_supported_fuzzy:
+                continue
+            confidence = max(item["confidence"] for item in eligible) if eligible else 0.72
+            proposals.append((confidence, candidate, evidence))
+
+    for confidence, candidate, evidence in sorted(
+            proposals, key=lambda item: (-item[0], item[1]["candidate_id"])):
+        left_id, right_id = candidate["left_local_ids"][0], candidate["right_local_ids"][0]
+        left_person, right_person = person_for_local(registry, left_id), person_for_local(registry, right_id)
+        if left_person == right_person:
+            continue
+        left_view = registry_party_views(registry)[representative_local_id(registry, left_person)]
+        right_view = registry_party_views(registry)[representative_local_id(registry, right_person)]
+        left_unique, right_unique = verified_unique_values(left_view), verified_unique_values(right_view)
+        if left_unique and right_unique and left_unique.isdisjoint(right_unique):
+            advisories.append(pair_candidate(
+                left_view, right_view, evidence, "strong_identifier_conflict",
+                ["different_verified_unique_identifiers"]))
+            continue
+        eligible_types = sorted({item["identifier_type"] for item in evidence
+                                 if item["auto_eligible"]})
+        method = "automatic_balanced_" + "_".join(eligible_types or ["supported_fuzzy_name"])
+        merge_people(registry, [left_person, right_person], method,
+                     candidate["candidate_id"], confidence,
+                     "+".join(eligible_types or ["supported_fuzzy_name"]))
+    return advisories
+
+
 def registry_party_views(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     views = {}
     for person_id, person in registry["persons"].items():
@@ -698,8 +845,9 @@ def registry_party_views(registry: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def generate_review_candidates(registry: dict[str, Any], parties: dict[str, dict[str, Any]],
                                grouping: list[dict[str, Any]],
-                               strong_conflicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = list(grouping)
+                               strong_conflicts: list[dict[str, Any]],
+                               extra_advisories: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    candidates = list(grouping) + list(extra_advisories or [])
     comparison_parties = registry_party_views(registry)
     local_ids = sorted(comparison_parties)
     current_person_ids = {person_for_local(registry, local_id) for local_id in parties}
@@ -712,34 +860,16 @@ def generate_review_candidates(registry: dict[str, Any], parties: dict[str, dict
             if (person_for_local(registry, left_id) not in current_person_ids
                     and person_for_local(registry, right_id) not in current_person_ids):
                 continue
-            signals, values, scores = [], [], []
-            for left_item in left["identifiers"]:
-                if left_item["identifier_type"] not in REVIEW_TYPES:
-                    continue
-                for right_item in right["identifiers"]:
-                    if left_item["identifier_type"] != right_item["identifier_type"]:
-                        continue
-                    kind = left_item["identifier_type"]
-                    left_value, right_value = left_item["normalized_value"], right_item["normalized_value"]
-                    if not left_value or not right_value:
-                        continue
-                    if left_value == right_value:
-                        signals.append(f"exact_{kind}")
-                        values.extend([left_item["value"], right_item["value"]])
-                        scores.append({"person_name": 0.80, "phone_number": 0.90,
-                                       "website": 0.88}[kind])
-                    elif kind == "person_name":
-                        left_surname, left_initial = name_parts(left_item["value"])
-                        right_surname, right_initial = name_parts(right_item["value"])
-                        ratio = difflib.SequenceMatcher(None, left_value, right_value).ratio()
-                        if left_surname and left_surname == right_surname and left_initial == right_initial and ratio >= 0.94:
-                            signals.append("high_similarity_person_name")
-                            values.extend([left_item["value"], right_item["value"]])
-                            scores.append(0.72)
-            if signals:
-                candidates.append(candidate_from_parties(
-                    "identity_match", left, right, signals, list(dict.fromkeys(values)),
-                    max(scores)))
+            evidence = matching_evidence(left, right)
+            if evidence:
+                left_unique = verified_unique_values(left)
+                right_unique = verified_unique_values(right)
+                if left_unique and right_unique and left_unique.isdisjoint(right_unique):
+                    candidates.append(pair_candidate(
+                        left, right, evidence, "strong_identifier_conflict",
+                        ["different_verified_unique_identifiers"]))
+                else:
+                    candidates.append(pair_candidate(left, right, evidence))
     for conflict in strong_conflicts:
         local = conflict["local_ids"]
         pair = next(((left_id, right_id) for left_id in local if left_id in parties
@@ -882,6 +1012,8 @@ def active_research_people(registry: dict[str, Any], parties: dict[str, dict[str
         methods = set(person.get("resolution_methods", []))
         if "manual_review" in methods:
             status = "reviewed_match"
+        elif any(value.startswith("automatic_balanced_") for value in methods):
+            status = "automatic_match"
         elif any(value.startswith("exact_verified_") for value in methods):
             status = "strong_identifier_match"
         elif local_count > 1:
@@ -893,8 +1025,34 @@ def active_research_people(registry: dict[str, Any], parties: dict[str, dict[str
                      "roles": sorted({role for party in current_parties for role in party["roles"]}),
                      "application_count": len({app for party in current_parties for app in party["application_ids"]}),
                      "document_count": len({doc for party in current_parties for doc in party["document_ids"]}),
-                     "resolution_status": status})
+                     "resolution_status": status,
+                     "identity_linkage_confidence": round(
+                         float(person.get("identity_linkage_confidence", 1.0)), 3)})
     return rows
+
+
+def add_recommender_statistics(people: list[dict[str, Any]],
+                               relationships: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    letters: dict[str, int] = defaultdict(int)
+    applicants: dict[str, set[str]] = defaultdict(set)
+    for relationship in relationships:
+        if relationship["relationship_type"] != "wrote_recommendation_for":
+            continue
+        subject = relationship["subject_person_id"]
+        letters[subject] += 1
+        applicants[subject].add(relationship["object_person_id"])
+    for person in people:
+        person_id = person["person_id"]
+        person["recommendation_letter_count"] = letters[person_id]
+        person["distinct_applicants_recommended"] = len(applicants[person_id])
+        person["is_repeat_recommender"] = len(applicants[person_id]) >= 2
+    return [
+        {key: person[key] for key in (
+            "person_id", "distinct_applicants_recommended", "recommendation_letter_count",
+            "application_count", "document_count", "identity_linkage_confidence",
+            "resolution_status")}
+        for person in people if person["is_repeat_recommender"]
+    ]
 
 
 def deidentified_relationships(relationships: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -908,7 +1066,9 @@ def emit_outputs(output_root: Path, run_id: str, status: str,
                  applications: list[dict[str, Any]], documents: list[dict[str, Any]],
                  people: list[dict[str, Any]], parties: dict[str, dict[str, Any]],
                  registry: dict[str, Any], relationships: list[dict[str, Any]],
-                 candidates: list[dict[str, Any]], input_checksums: dict[str, Any]) -> None:
+                 candidates: list[dict[str, Any]], repeat_recommenders: list[dict[str, Any]],
+                 automatic_matches: list[dict[str, Any]],
+                 input_checksums: dict[str, Any]) -> None:
     restricted = output_root / "restricted"
     researcher = output_root / "researcher"
     rows = review_rows(candidates, parties, registry)
@@ -926,34 +1086,49 @@ def emit_outputs(output_root: Path, run_id: str, status: str,
         write_json(restricted / "relationship_evidence.json", {
             "schema_version": SCHEMA_VERSION, "run_id": run_id, "relationships": relationships})
         write_csv(restricted / "review_queue.csv", REVIEW_COLUMNS, rows)
+        write_csv(restricted / "automatic_matches.csv",
+                  ["timestamp", "surviving_person_id", "retired_person_id", "method",
+                   "confidence", "evidence_type", "evidence"], automatic_matches)
         write_json(restricted / "resolution_summary.json", {
             "schema_version": SCHEMA_VERSION, "run_id": run_id, "status": status,
+            "review_required": False,
             "counts": {"applications": len(applications), "documents": len(documents),
                        "people": len(people), "relationships": len(relationships),
-                       "pending_review": len(candidates)},
+                       "repeat_recommenders": len(repeat_recommenders),
+                       "automatic_matches": len(automatic_matches),
+                       "pending_review": 0, "advisory_count": len(candidates)},
             "input_checksums": input_checksums,
         })
     finally:
         os.umask(previous_umask)
     public_relationships = deidentified_relationships(relationships)
     dataset = {"schema_version": SCHEMA_VERSION, "run_id": run_id, "status": status,
+               "review_required": False,
                "counts": {"applications": len(applications), "documents": len(documents),
                           "people": len(people), "relationships": len(public_relationships),
-                          "pending_review": len(candidates)},
+                          "repeat_recommenders": len(repeat_recommenders),
+                          "pending_review": 0, "advisory_count": len(candidates)},
                "applications": applications, "documents": documents,
-               "people": people, "relationships": public_relationships}
+               "people": people, "relationships": public_relationships,
+               "repeat_recommenders": repeat_recommenders}
     write_json(researcher / "dataset.json", dataset)
     write_csv(researcher / "applications.csv",
               ["application_id", "has_cv", "recommendation_letter_count", "status"], applications)
     write_csv(researcher / "documents.csv",
               ["document_id", "application_id", "document_type", "letter_index", "status"], documents)
     write_csv(researcher / "people.csv",
-              ["person_id", "roles", "application_count", "document_count", "resolution_status"],
+              ["person_id", "roles", "application_count", "document_count", "resolution_status",
+               "identity_linkage_confidence", "recommendation_letter_count",
+               "distinct_applicants_recommended", "is_repeat_recommender"],
               ({**row, "roles": "|".join(row["roles"])} for row in people))
     write_csv(researcher / "relationships.csv",
               ["relationship_id", "relationship_type", "subject_person_id", "object_person_id",
                "application_id", "document_id", "confidence", "review_status"],
               public_relationships)
+    write_csv(researcher / "repeat_recommenders.csv",
+              ["person_id", "distinct_applicants_recommended", "recommendation_letter_count",
+               "application_count", "document_count", "identity_linkage_confidence",
+               "resolution_status"], repeat_recommenders)
     generated = [path for path in sorted(researcher.iterdir()) if path.name != "manifest.json"]
     write_json(researcher / "manifest.json", {
         "schema_version": SCHEMA_VERSION, "run_id": run_id, "status": status,
@@ -1000,24 +1175,31 @@ def main() -> int:
         ensure_persons(registry, parties)
         decisions = parse_decisions(args.decisions_csv.resolve() if args.decisions_csv else None)
         apply_decisions(registry, decisions)
+        automatic_merge_start = len(registry["merges"])
         strong_conflicts = auto_merge_strong(
             registry, parties, preexisting_person_ids)
-        candidates = generate_review_candidates(registry, parties, grouping, strong_conflicts)
+        balanced_advisories = auto_merge_balanced(registry, parties)
+        automatic_matches = registry["merges"][automatic_merge_start:]
+        candidates = generate_review_candidates(
+            registry, parties, grouping, strong_conflicts, balanced_advisories)
         relationships = build_relationships(seeds, registry)
         people = active_research_people(registry, parties)
-        status = "ready_with_pending_review" if candidates else "ready"
+        repeat_recommenders = add_recommender_statistics(people, relationships)
+        status = "ready"
         run_id = f"run_{uuid.uuid4().hex}"
         output_root.mkdir(parents=True, exist_ok=True)
         emit_outputs(output_root, run_id, status, applications, documents, people, parties,
-                     registry, relationships, candidates, input_checksums)
+                     registry, relationships, candidates, repeat_recommenders,
+                     automatic_matches, input_checksums)
         registry["updated_at"] = now_utc()
         atomic_write_registry(registry_path, registry)
     except (csv.Error, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         logging.error("Resolution failed error=%s", type(exc).__name__)
         return 2
-    logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d pending_review=%d seconds=%.1f",
+    logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d repeat_recommenders=%d advisories=%d seconds=%.1f",
                  len(cv_paths), len(recommendation_paths), len(applications), len(documents),
-                 len(people), len(relationships), len(candidates), time.monotonic() - started)
+                 len(people), len(relationships), len(repeat_recommenders), len(candidates),
+                 time.monotonic() - started)
     return 0
 
 
