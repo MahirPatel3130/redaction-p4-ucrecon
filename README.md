@@ -57,6 +57,21 @@ python redact_cv.py --input-root samples --output-root outputs-json \
   --reuse-model-responses-from outputs-v2 --json-only
 ```
 
+Existing clean CV JSON can be upgraded with future-ready identity fields without source PDFs,
+Gemma, or GPU inference. Always use a new output directory so the verified input stays unchanged:
+
+```bash
+python redact_cv.py \
+  --upgrade-json-from /protected/outputs-v7 \
+  --output-root /protected/outputs-v8
+```
+
+The enriched record retains the original CV fields and adds `schema_version`, `application_id`,
+`document_id`, `document_type`, `parties`, local person IDs, mention IDs, `person_id: null`, and a
+reserved empty `relationships` list. `person_id` remains unset until a later protected
+cross-application identity-resolution phase. The path-keyed `redactions.json` remains available,
+and `cv_redactions.json` additionally groups the same records by application and document.
+
 Outputs preserve the source folder structure. Each CV gets a JSON record and, only when every
 page succeeds and post-redaction verification passes, a `_redacted.pdf`. The output root also
 receives `redactions.json`, keyed by each source PDF's relative path. JSON separates unique

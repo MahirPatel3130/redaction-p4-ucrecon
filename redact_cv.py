@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from typing import Any
 
 
 MODEL_DEFAULT = "google/gemma-4-31B-it"
+SCHEMA_VERSION = "1.0"
 CV_NAME = re.compile(r"(?:cv|curriculum[_ -]?vitae)", re.IGNORECASE)
 CATEGORIES = {
     "applicant_name", "email", "phone_number", "website", "address",
@@ -24,6 +26,17 @@ CATEGORIES = {
 }
 OWNER_ROLES = {"applicant", "coauthor", "reference", "advisor", "committee_member",
                "institution", "document_furniture", "unknown"}
+CATEGORY_TO_IDENTIFIER = {
+    "applicant_name": "person_name",
+    "coauthor_identity": "person_name",
+    "reference_identity": "person_name",
+    "address": "postal_address",
+    "email": "email",
+    "phone_number": "phone_number",
+    "website": "website",
+    "publication_information": "publication_information",
+    "other_identifying_data": "other_identifying_data",
+}
 
 CONTACT_PROMPT = """Detect every identifying contact or identity region on this CV page.
 Return JSON only: {"detections":[{"box_2d":[y_min,x_min,y_max,x_max],
@@ -54,7 +67,7 @@ DOI_RE = re.compile(r"(?i)\b(?:doi\s*:\s*)?10\.\d{4,9}/[-._;()/:A-Z0-9]+")
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input-root", type=Path, required=True)
+    p.add_argument("--input-root", type=Path)
     p.add_argument("--output-root", type=Path, required=True)
     p.add_argument("--model", default=MODEL_DEFAULT)
     p.add_argument("--dpi", type=int, default=144)
@@ -64,12 +77,18 @@ def parse_args() -> argparse.Namespace:
                    help="Produce the entity inventory without generating a PDF")
     p.add_argument("--reuse-model-responses-from", type=Path,
                    help="Replay protected *.model-responses.json files without loading the model")
+    p.add_argument("--upgrade-json-from", type=Path,
+                   help="Add identity fields to existing CV JSON without PDFs or model inference")
     p.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     args = p.parse_args()
     if not 72 <= args.dpi <= 600:
         p.error("--dpi must be between 72 and 600")
     if not 0 <= args.margin_points <= 12:
         p.error("--margin-points must be between 0 and 12")
+    if args.upgrade_json_from and args.reuse_model_responses_from:
+        p.error("--upgrade-json-from cannot be combined with --reuse-model-responses-from")
+    if not args.upgrade_json_from and not args.input_root:
+        p.error("--input-root is required unless --upgrade-json-from is used")
     return args
 
 
@@ -650,6 +669,232 @@ def normalized_value(category: str, value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().lower())
 
 
+def stable_id(prefix: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}_{digest}"
+
+
+def application_id(relative_path: Path) -> str:
+    return stable_id("app", relative_path.as_posix())
+
+
+def document_id(relative_path: Path) -> str:
+    return stable_id("doc", relative_path.as_posix())
+
+
+def safe_relative_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError(f"Unsafe source_relative_path: {value!r}")
+    return path
+
+
+def cv_local_person_id(app_id: str, doc_id: str, role: str, category: str,
+                       normalized: str) -> str:
+    if role == "applicant" or category == "applicant_name":
+        return f"{app_id}:applicant"
+    key = hashlib.sha256(f"{category}|{normalized}".encode("utf-8")).hexdigest()[:10]
+    return f"{doc_id}:{role}:{key}"
+
+
+def occurrence_mention_id(doc_id: str, entity_id: str, page: Any,
+                          bbox: Any) -> str:
+    coordinates = bbox if isinstance(bbox, list) and len(bbox) == 4 else []
+    formatted = ",".join(f"{float(value):.5f}" for value in coordinates)
+    return stable_id("men", f"{doc_id}|{entity_id}|{page}|{formatted}")
+
+
+def build_cv_parties(entities: list[dict[str, Any]], app_id: str) -> list[dict[str, Any]]:
+    applicant_id = f"{app_id}:applicant"
+    parties: dict[str, dict[str, Any]] = {
+        applicant_id: {"local_person_id": applicant_id, "person_id": None,
+                       "role": "applicant", "entity_ids": [],
+                       "identifier_types_observed": []}
+    }
+    for entity in entities:
+        local_id = entity["local_person_id"]
+        party = parties.setdefault(local_id, {
+            "local_person_id": local_id,
+            "person_id": None,
+            "role": entity["person_role"],
+            "entity_ids": [],
+            "identifier_types_observed": [],
+        })
+        party["entity_ids"].append(entity["entity_id"])
+        party["identifier_types_observed"].append(entity["identifier_type"])
+    for party in parties.values():
+        party["entity_ids"] = sorted(set(party["entity_ids"]))
+        party["identifier_types_observed"] = sorted(
+            set(party["identifier_types_observed"]))
+    return sorted(parties.values(), key=lambda party: party["local_person_id"])
+
+
+def enrich_cv_record(record: dict[str, Any], relative: Path) -> dict[str, Any]:
+    """Add stable identity metadata without changing detected values or geometry."""
+    enriched = json.loads(json.dumps(record))
+    relative = safe_relative_path(relative.as_posix())
+    app_relative = relative.parent
+    app_id = application_id(app_relative)
+    doc_id = document_id(relative)
+    enriched.update({"schema_version": SCHEMA_VERSION,
+                     "application_id": app_id,
+                     "document_id": doc_id,
+                     "document_type": "cv"})
+    enriched["source_relative_path"] = relative.as_posix()
+    entities = enriched.get("entities", [])
+    redactions = enriched.get("redactions", [])
+    if not isinstance(entities, list) or not isinstance(redactions, list):
+        raise ValueError(f"CV record lists are malformed: {relative}")
+
+    seen_entity_ids: set[str] = set()
+    entity_matches: list[dict[str, Any]] = []
+    for index, entity in enumerate(entities):
+        if not isinstance(entity, dict):
+            raise ValueError(f"CV entity is malformed: {relative} index={index}")
+        category = str(entity.get("category", "unknown"))
+        role = str(entity.get("owner_role", "unknown"))
+        value = str(entity.get("value", ""))
+        normalized = normalized_value(category, value)
+        entity_id = str(entity.get("entity_id", ""))
+        if not entity_id or entity_id in seen_entity_ids:
+            entity_id = stable_id("ent", f"{doc_id}|{index}|{category}|{normalized}")
+            entity["entity_id"] = entity_id
+        seen_entity_ids.add(entity_id)
+        identifier_type = CATEGORY_TO_IDENTIFIER.get(category, category or "unknown_identifier")
+        local_id = cv_local_person_id(app_id, doc_id, role, category, normalized)
+        entity.update({"identifier_type": identifier_type,
+                       "person_role": role,
+                       "local_person_id": local_id,
+                       "person_id": None})
+        aliases = [str(alias) for alias in entity.get("aliases", [])]
+        if value and value not in aliases:
+            aliases.insert(0, value)
+        alias_keys = {normalized_value(category, alias) for alias in aliases}
+        occurrence_rows = []
+        occurrences = entity.get("occurrences", [])
+        if not isinstance(occurrences, list):
+            raise ValueError(f"CV occurrences are malformed: {relative} entity={entity_id}")
+        for occurrence in occurrences:
+            if not isinstance(occurrence, dict):
+                raise ValueError(f"CV occurrence is malformed: {relative} entity={entity_id}")
+            mention_id = occurrence_mention_id(
+                doc_id, entity_id, occurrence.get("page"), occurrence.get("bbox_normalized"))
+            occurrence["mention_id"] = mention_id
+            occurrence_rows.append({"page": occurrence.get("page"),
+                                    "bbox": occurrence.get("bbox_normalized"),
+                                    "mention_id": mention_id})
+        entity_matches.append({"entity": entity, "category": category,
+                               "alias_keys": alias_keys, "occurrences": occurrence_rows})
+
+    unlinked = 0
+    for index, redaction in enumerate(redactions):
+        if not isinstance(redaction, dict):
+            raise ValueError(f"CV redaction is malformed: {relative} index={index}")
+        category = str(redaction.get("category", "unknown"))
+        role = str(redaction.get("owner_role", "unknown"))
+        text = str(redaction.get("text", ""))
+        normalized = normalized_value(category, text)
+        bbox = redaction.get("bbox_normalized")
+        page = redaction.get("page")
+        candidates = []
+        for match in entity_matches:
+            if match["category"] != category or normalized not in match["alias_keys"]:
+                continue
+            for occurrence in match["occurrences"]:
+                other_bbox = occurrence["bbox"]
+                if occurrence["page"] != page or not isinstance(bbox, list) or len(bbox) != 4 \
+                        or not isinstance(other_bbox, list) or len(other_bbox) != 4:
+                    continue
+                overlap = iou(bbox, other_bbox)
+                if overlap >= 0.30:
+                    candidates.append((overlap, match["entity"], occurrence["mention_id"]))
+        identifier_type = CATEGORY_TO_IDENTIFIER.get(category, category or "unknown_identifier")
+        if candidates:
+            _, entity, mention_id = max(candidates, key=lambda item: item[0])
+            redaction.update({"identifier_type": identifier_type,
+                              "person_role": entity["person_role"],
+                              "entity_id": entity["entity_id"],
+                              "mention_id": mention_id,
+                              "local_person_id": entity["local_person_id"],
+                              "person_id": None})
+        else:
+            unlinked += 1
+            local_id = cv_local_person_id(app_id, doc_id, role, category, normalized)
+            redaction.update({"identifier_type": identifier_type,
+                              "person_role": role,
+                              "entity_id": None,
+                              "mention_id": stable_id(
+                                  "men", f"{doc_id}|unlinked|{index}|{page}|{bbox}"),
+                              "local_person_id": local_id,
+                              "person_id": None})
+
+    flags = enriched.setdefault("review_flags", [])
+    if not isinstance(flags, list):
+        raise ValueError(f"CV review_flags is malformed: {relative}")
+    if unlinked and "unlinked_redaction_occurrence" not in flags:
+        flags.append("unlinked_redaction_occurrence")
+    enriched["parties"] = build_cv_parties(entities, app_id)
+    enriched["relationships"] = []
+    return enriched
+
+
+def build_cv_aggregate(documents: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    applications: dict[str, dict[str, Any]] = {}
+    for path, record in sorted(documents.items()):
+        relative = safe_relative_path(path)
+        app_id = record["application_id"]
+        application = applications.setdefault(app_id, {
+            "application_id": app_id,
+            "source_application_path": relative.parent.as_posix(),
+            "status": "completed",
+            "documents": [],
+            "errors": [],
+        })
+        application["documents"].append(record["document_id"])
+        if record.get("status") not in {"completed", "json_completed"}:
+            application["status"] = "failed"
+            application["errors"].append({"document_id": record["document_id"],
+                                           "status": record.get("status", "unknown")})
+    return {"schema_version": SCHEMA_VERSION,
+            "applications": applications,
+            "documents": dict(sorted(documents.items()))}
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def write_cv_aggregates(output_root: Path,
+                        documents: dict[str, dict[str, Any]]) -> None:
+    write_json(output_root / "redactions.json", dict(sorted(documents.items())))
+    write_json(output_root / "cv_redactions.json", build_cv_aggregate(documents))
+
+
+def upgrade_existing_json(source_root: Path, output_root: Path) -> int:
+    aggregate_path = source_root / "redactions.json"
+    if not aggregate_path.is_file():
+        raise ValueError(f"Missing legacy aggregate: {aggregate_path}")
+    raw = json.loads(aggregate_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or "documents" in raw or "applications" in raw:
+        raise ValueError("Expected a legacy path-keyed redactions.json object")
+    documents: dict[str, dict[str, Any]] = {}
+    for key, record in sorted(raw.items()):
+        if not isinstance(record, dict):
+            raise ValueError(f"Malformed CV record for key: {key}")
+        relative = safe_relative_path(str(record.get("source_relative_path") or key))
+        enriched = enrich_cv_record(record, relative)
+        documents[relative.as_posix()] = enriched
+    for relative_string, enriched in documents.items():
+        relative = Path(relative_string)
+        write_json(output_root / relative.with_suffix(".json"), enriched)
+        logging.info("Upgraded path=%s entities=%d redactions=%d", relative,
+                     len(enriched["entities"]), len(enriched["redactions"]))
+    write_cv_aggregates(output_root, documents)
+    return 1 if any(record.get("status") not in {"completed", "json_completed"}
+                    for record in documents.values()) else 0
+
+
 def build_entities(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for item in items:
@@ -750,7 +995,8 @@ def process_cv(source: Path, input_root: Path, output_root: Path, pipe: Any, mod
         response_path.write_text(json.dumps(raw_pages, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         record = clean_json_inventory(source, response_path, model)
         record["source_relative_path"] = relative.as_posix()
-        json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        record = enrich_cv_record(record, relative)
+        write_json(json_path, record)
         logging.info("Finished %s status=json_completed pages=%d entities=%d seconds=%.1f",
                      relative, page_count, len(record["entities"]), time.monotonic() - started)
         return record
@@ -770,8 +1016,8 @@ def process_cv(source: Path, input_root: Path, output_root: Path, pipe: Any, mod
               "model": model, "status": status, "review_required": True, "page_count": page_count,
               "entities": entities, "redactions": [{k: v for k, v in x.items() if k != "rect_points"} for x in items],
               "errors": errors, "verification_errors": verification_errors}
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    record = enrich_cv_record(record, relative)
+    write_json(json_path, record)
     if debug:
         debug_path = json_path.with_name(json_path.stem + ".model-responses.json")
         debug_path.write_text(json.dumps(raw_pages, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -782,7 +1028,22 @@ def process_cv(source: Path, input_root: Path, output_root: Path, pipe: Any, mod
 
 def main() -> int:
     args = parse_args(); logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
-    input_root, output_root = args.input_root.resolve(), args.output_root.resolve()
+    output_root = args.output_root.resolve()
+    if args.upgrade_json_from:
+        source_root = args.upgrade_json_from.resolve()
+        if not source_root.is_dir():
+            logging.error("Upgrade source is not a directory: %s", source_root); return 2
+        if source_root == output_root or source_root in output_root.parents:
+            logging.error("Upgrade output must be separate from and outside the source root"); return 2
+        if output_root.exists() and any(output_root.iterdir()):
+            logging.error("Upgrade output directory must not already contain files: %s", output_root); return 2
+        output_root.mkdir(parents=True, exist_ok=True)
+        try:
+            return upgrade_existing_json(source_root, output_root)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            logging.error("JSON upgrade failed error=%s", type(exc).__name__)
+            return 2
+    input_root = args.input_root.resolve()
     if not input_root.is_dir(): logging.error("Input root is not a directory: %s", input_root); return 2
     if input_root == output_root or input_root in output_root.parents:
         logging.error("Output root must not be the input root or nested inside it"); return 2
@@ -799,20 +1060,21 @@ def main() -> int:
             relative = source.relative_to(input_root)
             response_path = reuse_root / relative.with_suffix("").with_name(relative.stem + ".model-responses.json")
             if not response_path.exists():
-                aggregate[relative.as_posix()] = {"source_pdf": source.name,
+                record = {"source_pdf": source.name,
                     "source_relative_path": relative.as_posix(), "status": "failed",
                     "review_required": True, "entities": [], "redactions": [],
                     "errors": [{"page": None, "error": f"Missing saved responses: {response_path}"}]}
+                aggregate[relative.as_posix()] = enrich_cv_record(record, relative)
                 continue
             record = clean_json_inventory(source, response_path, args.model)
             record["source_relative_path"] = relative.as_posix()
+            record = enrich_cv_record(record, relative)
             destination = output_root / relative.with_suffix(".json")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            write_json(destination, record)
             aggregate[relative.as_posix()] = record
             logging.info("Replayed %s entities=%d discarded=%d", relative, len(record["entities"]),
                          len(record["discarded_model_detections"]))
-        (output_root / "redactions.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_cv_aggregates(output_root, aggregate)
         return 1 if any(x.get("status") != "json_completed" for x in aggregate.values()) else 0
     pipe = load_pipeline(args.model)
     for source in sources:
@@ -823,13 +1085,15 @@ def main() -> int:
                                               args.json_only)
         except Exception as exc:
             logging.exception("Document failed path=%s error=%s", relative, type(exc).__name__)
-            aggregate[relative] = {"source_pdf": source.name, "source_relative_path": relative,
+            record = {"source_pdf": source.name, "source_relative_path": relative,
                                    "redacted_pdf": None, "model": args.model, "status": "failed",
                                    "review_required": True, "entities": [], "redactions": [],
                                    "errors": [{"page": None, "error": f"{type(exc).__name__}: {exc}"}],
                                    "verification_errors": []}
-    (output_root / "redactions.json").write_text(json.dumps(aggregate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return 1 if any(x["status"] != "completed" for x in aggregate.values()) else 0
+            aggregate[relative] = enrich_cv_record(record, Path(relative))
+    write_cv_aggregates(output_root, aggregate)
+    successful_status = "json_completed" if args.json_only else "completed"
+    return 1 if any(x["status"] != successful_status for x in aggregate.values()) else 0
 
 
 if __name__ == "__main__": sys.exit(main())
