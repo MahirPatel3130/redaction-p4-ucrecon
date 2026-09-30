@@ -179,6 +179,26 @@ connected by recommendation letters to at least two distinct applicant person ID
 letters for one applicant count once. Stable pseudonymous IDs remain linkable data, so the
 researcher package is still a controlled dataset even though it excludes direct identifiers.
 
+Each run also creates `researcher_p4/` for research teams explicitly authorized to receive the
+detected P4 values. It contains the same relationship tables plus `redactions.json` and
+`redactions.csv`, with one row per accepted redaction occurrence from successful CV and
+recommendation-letter records. Rows contain the exact detected text, category, role, page,
+confidence, verification status, and resolved `person_id` when direct-person resolution covers
+that party. Failed and failed-verification documents are excluded and counted in the package
+quality metadata. PDF geometry, source paths, filenames, local-person IDs, model responses, and
+discarded detections are omitted.
+
+The two directories have different handling requirements:
+
+- `researcher/` remains the de-identified controlled relationship package.
+- `researcher_p4/` contains direct identifiers, is labeled `P4-sensitive`, and is written with
+  owner-only permissions. Its generated README documents every file, join key, null-person
+  behavior, and filtering rule.
+
+To produce the combined P4 delivery after upgrading this repository, rerun the same six aggregate
+inputs and persistent registry with a new output root such as `run_003`; no Gemma or PDF rerun is
+needed. Deliver only `run_003/researcher_p4/` to an authorized P4 research team.
+
 Every resolution run must use a new or empty output directory. Keep the registry at a stable,
 access-controlled path so person IDs and accepted/rejected decisions survive later runs. The v1
 resolver intentionally excludes publications, authorship, advisors, and committee relationships.

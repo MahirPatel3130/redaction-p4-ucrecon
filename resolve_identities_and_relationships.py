@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve direct-person identities and export a de-identified relationship dataset."""
+"""Resolve direct-person identities and export relationship research datasets."""
 
 from __future__ import annotations
 
@@ -35,6 +35,12 @@ REVIEW_COLUMNS = [
     "left_local_person_ids", "right_local_person_ids", "left_roles", "right_roles",
     "evidence_types", "evidence_values", "confidence", "conflicts", "decision",
     "reviewer_note",
+]
+P4_REDACTION_COLUMNS = [
+    "redaction_id", "entity_id", "application_id", "document_id", "document_type",
+    "letter_index", "category", "identifier_type", "person_role", "person_id",
+    "identity_link_status", "text", "page", "reason", "match_confidence",
+    "value_verified_against_pdf",
 ]
 
 
@@ -1062,15 +1068,217 @@ def deidentified_relationships(relationships: list[dict[str, Any]]) -> list[dict
             for item in relationships]
 
 
+def optional_confidence(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(confidence, 3) if 0.0 <= confidence <= 1.0 else None
+
+
+def collect_p4_redactions(cv: dict[str, Any], recommendations: dict[str, Any],
+                          registry: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Create one analysis record per accepted redaction occurrence."""
+    records: list[dict[str, Any]] = []
+    seen_redaction_ids: set[str] = set()
+    excluded_by_status: dict[str, int] = defaultdict(int)
+    excluded_redactions = 0
+    successful_documents = 0
+    excluded_documents = 0
+
+    for aggregate in (cv, recommendations):
+        for record in aggregate["documents"].values():
+            status = str(record.get("status", "unknown"))
+            redactions = record.get("redactions", [])
+            if status not in SUCCESS_STATUSES:
+                excluded_documents += 1
+                excluded_redactions += len(redactions) if isinstance(redactions, list) else 0
+                excluded_by_status[status] += 1
+                continue
+            if not isinstance(redactions, list):
+                raise ValueError("Successful document redactions field is malformed")
+            successful_documents += 1
+            application_id = str(record["application_id"])
+            document_id = str(record["document_id"])
+            document_type = str(record["document_type"])
+            letter_index = record.get("letter_index")
+            entities = record.get("entities", [])
+            if not isinstance(entities, list):
+                raise ValueError("Successful document entities field is malformed")
+            entity_lookup = {
+                str(entity.get("entity_id")): entity for entity in entities
+                if isinstance(entity, dict) and entity.get("entity_id")
+            }
+            for redaction in redactions:
+                if not isinstance(redaction, dict):
+                    raise ValueError("Successful document contains a malformed redaction")
+                redaction_id = str(redaction.get("mention_id", ""))
+                if not redaction_id or redaction_id in seen_redaction_ids:
+                    raise ValueError("Missing or duplicate redaction mention ID")
+                seen_redaction_ids.add(redaction_id)
+                entity_id = str(redaction.get("entity_id") or "")
+                entity = entity_lookup.get(entity_id, {})
+                text = redaction.get("text")
+                page = redaction.get("page")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Successful document contains empty redaction text")
+                if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+                    raise ValueError("Successful document contains an invalid redaction page")
+                identifier_type = str(redaction.get("identifier_type")
+                                      or entity.get("identifier_type") or "")
+                category = str(redaction.get("category") or identifier_type)
+                person_role = str(redaction.get("person_role")
+                                  or redaction.get("owner_role")
+                                  or entity.get("person_role") or "unknown")
+                if not identifier_type or not category:
+                    raise ValueError("Successful redaction is missing its identifier type")
+                local_id = str(redaction.get("local_person_id")
+                               or entity.get("local_person_id") or "")
+                if not entity_id:
+                    person_id = None
+                    link_status = "unlinked_redaction"
+                elif local_id in registry["local_party_index"]:
+                    person_id = person_for_local(registry, local_id)
+                    link_status = "resolved"
+                else:
+                    person_id = None
+                    link_status = "outside_v1_identity_scope"
+                confidence = optional_confidence(
+                    redaction.get("match_confidence", entity.get("match_confidence")))
+                verified = redaction.get(
+                    "value_verified_against_pdf",
+                    entity.get("value_verified_against_pdf"))
+                if verified is not None and not isinstance(verified, bool):
+                    raise ValueError("Successful redaction has invalid verification metadata")
+                records.append({
+                    "redaction_id": redaction_id,
+                    "entity_id": entity_id or None,
+                    "application_id": application_id,
+                    "document_id": document_id,
+                    "document_type": document_type,
+                    "letter_index": letter_index,
+                    "category": category,
+                    "identifier_type": identifier_type,
+                    "person_role": person_role,
+                    "person_id": person_id,
+                    "identity_link_status": link_status,
+                    "text": text,
+                    "page": page,
+                    "reason": str(redaction.get("reason") or entity.get("reason") or ""),
+                    "match_confidence": confidence,
+                    "value_verified_against_pdf": verified,
+                })
+
+    records.sort(key=lambda item: (
+        item["application_id"], item["document_id"], item["page"], item["redaction_id"]))
+    link_counts = {status: sum(
+        item["identity_link_status"] == status for item in records)
+        for status in ("resolved", "outside_v1_identity_scope", "unlinked_redaction")}
+    quality = {
+        "source_documents": successful_documents + excluded_documents,
+        "successful_documents": successful_documents,
+        "excluded_documents": excluded_documents,
+        "excluded_documents_by_status": dict(sorted(excluded_by_status.items())),
+        "delivered_redactions": len(records),
+        "excluded_redactions": excluded_redactions,
+        "identity_link_counts": link_counts,
+    }
+    return records, quality
+
+
+def p4_package_readme() -> str:
+    return """# P4 Researcher Package
+
+**Classification: P4-sensitive.** This directory contains actual identifiers extracted from CVs
+and recommendation letters. Store, transfer, and use it only in an approved P4 environment.
+
+## Files
+
+- `dataset.json`: canonical relationship dataset plus the `redactions` array.
+- `redactions.json`: focused redaction-occurrence dataset and quality summary.
+- `redactions.csv`: tabular equivalent of the redactions array.
+- `applications.csv`, `documents.csv`, `people.csv`, `relationships.csv`: analysis tables.
+- `repeat_recommenders.csv`: resolved writers connected to at least two distinct applicants.
+- `manifest.json`: classification, counts, source checksums, and file checksums.
+
+## Joining the data
+
+Join redactions to documents with `document_id`, applications with `application_id`, and resolved
+people with `person_id`. `redaction_id` identifies one occurrence. `entity_id` groups repeated
+occurrences within a document and is not globally unique by itself.
+
+`identity_link_status` is `resolved` when `person_id` is available,
+`outside_v1_identity_scope` for identities not handled by direct-person resolution, and
+`unlinked_redaction` when the source redaction could not be linked to an entity. A null
+`person_id` is therefore expected for publications, institutional information, third parties,
+and other deferred identity types.
+
+## Table fields
+
+- `applications.csv`: `application_id`, CV availability, recommendation-letter count, and status.
+- `documents.csv`: `document_id`, `application_id`, document type, letter index, and status.
+- `people.csv`: `person_id`, observed roles, application/document counts, resolution status,
+  linkage confidence, letter count, distinct applicants recommended, and repeat-writer flag.
+- `relationships.csv`: relationship ID/type, subject and object person IDs, supporting application
+  and document IDs, confidence, and review status.
+- `repeat_recommenders.csv`: person ID, distinct applicants recommended, letter count,
+  application/document counts, linkage confidence, and resolution status.
+
+Each redaction row contains `redaction_id`, document-scoped `entity_id`, `application_id`,
+`document_id`, `document_type`, optional `letter_index`, source `category`, common
+`identifier_type`, `person_role`, optional resolved `person_id`, `identity_link_status`, exact
+P4 `text`, one-based `page`, detection `reason`, optional `match_confidence`, and optional
+`value_verified_against_pdf`.
+
+`dataset.json` contains all analysis tables as arrays. `redactions.json` contains the redactions
+and their quality summary. `manifest.json` contains classification, run status, record counts,
+source checksums, and SHA-256 checksums for every other file in this directory.
+
+Only documents with status `completed` or `json_completed` contribute redaction rows. Quality
+counts in the JSON files report excluded documents and partial redactions. PDF geometry, source
+paths, filenames, local-person IDs, model responses, and discarded detections are not included.
+
+The JSON text values are canonical. CSV cells beginning with `=`, `+`, `-`, or `@` receive a
+leading apostrophe to prevent spreadsheet formula execution.
+"""
+
+
+def write_research_csvs(root: Path, applications: list[dict[str, Any]],
+                        documents: list[dict[str, Any]], people: list[dict[str, Any]],
+                        public_relationships: list[dict[str, Any]],
+                        repeat_recommenders: list[dict[str, Any]]) -> None:
+    write_csv(root / "applications.csv",
+              ["application_id", "has_cv", "recommendation_letter_count", "status"], applications)
+    write_csv(root / "documents.csv",
+              ["document_id", "application_id", "document_type", "letter_index", "status"], documents)
+    write_csv(root / "people.csv",
+              ["person_id", "roles", "application_count", "document_count", "resolution_status",
+               "identity_linkage_confidence", "recommendation_letter_count",
+               "distinct_applicants_recommended", "is_repeat_recommender"],
+              ({**row, "roles": "|".join(row["roles"])} for row in people))
+    write_csv(root / "relationships.csv",
+              ["relationship_id", "relationship_type", "subject_person_id", "object_person_id",
+               "application_id", "document_id", "confidence", "review_status"],
+              public_relationships)
+    write_csv(root / "repeat_recommenders.csv",
+              ["person_id", "distinct_applicants_recommended", "recommendation_letter_count",
+               "application_count", "document_count", "identity_linkage_confidence",
+               "resolution_status"], repeat_recommenders)
+
+
 def emit_outputs(output_root: Path, run_id: str, status: str,
                  applications: list[dict[str, Any]], documents: list[dict[str, Any]],
                  people: list[dict[str, Any]], parties: dict[str, dict[str, Any]],
                  registry: dict[str, Any], relationships: list[dict[str, Any]],
                  candidates: list[dict[str, Any]], repeat_recommenders: list[dict[str, Any]],
                  automatic_matches: list[dict[str, Any]],
+                 p4_redactions: list[dict[str, Any]], p4_quality: dict[str, Any],
                  input_checksums: dict[str, Any]) -> None:
     restricted = output_root / "restricted"
     researcher = output_root / "researcher"
+    researcher_p4 = output_root / "researcher_p4"
     rows = review_rows(candidates, parties, registry)
     identity_resolution = {
         "schema_version": SCHEMA_VERSION, "run_id": run_id,
@@ -1112,29 +1320,51 @@ def emit_outputs(output_root: Path, run_id: str, status: str,
                "people": people, "relationships": public_relationships,
                "repeat_recommenders": repeat_recommenders}
     write_json(researcher / "dataset.json", dataset)
-    write_csv(researcher / "applications.csv",
-              ["application_id", "has_cv", "recommendation_letter_count", "status"], applications)
-    write_csv(researcher / "documents.csv",
-              ["document_id", "application_id", "document_type", "letter_index", "status"], documents)
-    write_csv(researcher / "people.csv",
-              ["person_id", "roles", "application_count", "document_count", "resolution_status",
-               "identity_linkage_confidence", "recommendation_letter_count",
-               "distinct_applicants_recommended", "is_repeat_recommender"],
-              ({**row, "roles": "|".join(row["roles"])} for row in people))
-    write_csv(researcher / "relationships.csv",
-              ["relationship_id", "relationship_type", "subject_person_id", "object_person_id",
-               "application_id", "document_id", "confidence", "review_status"],
-              public_relationships)
-    write_csv(researcher / "repeat_recommenders.csv",
-              ["person_id", "distinct_applicants_recommended", "recommendation_letter_count",
-               "application_count", "document_count", "identity_linkage_confidence",
-               "resolution_status"], repeat_recommenders)
+    write_research_csvs(researcher, applications, documents, people, public_relationships,
+                        repeat_recommenders)
     generated = [path for path in sorted(researcher.iterdir()) if path.name != "manifest.json"]
     write_json(researcher / "manifest.json", {
         "schema_version": SCHEMA_VERSION, "run_id": run_id, "status": status,
         "input_checksums": input_checksums,
         "files": {path.name: file_sha256(path) for path in generated},
     })
+
+    researcher_p4.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(researcher_p4, 0o700)
+    previous_umask = os.umask(0o077)
+    try:
+        p4_counts = {**dataset["counts"], "redactions": len(p4_redactions),
+                     "excluded_redaction_documents": p4_quality["excluded_documents"]}
+        p4_dataset = {**dataset, "data_classification": "P4-sensitive",
+                      "counts": p4_counts, "redaction_quality": p4_quality,
+                      "redactions": p4_redactions}
+        write_json(researcher_p4 / "dataset.json", p4_dataset)
+        write_json(researcher_p4 / "redactions.json", {
+            "schema_version": SCHEMA_VERSION, "run_id": run_id,
+            "data_classification": "P4-sensitive", "status": status,
+            "quality": p4_quality, "redactions": p4_redactions,
+        })
+        p4_csv_rows = [
+            {**item, "text": csv_safe(item["text"]),
+             "reason": csv_safe(item["reason"])} for item in p4_redactions
+        ]
+        write_csv(researcher_p4 / "redactions.csv", P4_REDACTION_COLUMNS, p4_csv_rows)
+        write_research_csvs(researcher_p4, applications, documents, people,
+                            public_relationships, repeat_recommenders)
+        (researcher_p4 / "README.md").write_text(p4_package_readme(), encoding="utf-8")
+        p4_generated = [path for path in sorted(researcher_p4.iterdir())
+                        if path.name != "manifest.json"]
+        write_json(researcher_p4 / "manifest.json", {
+            "schema_version": SCHEMA_VERSION, "run_id": run_id, "status": status,
+            "data_classification": "P4-sensitive", "counts": p4_counts,
+            "redaction_quality": p4_quality, "input_checksums": input_checksums,
+            "files": {path.name: file_sha256(path) for path in p4_generated},
+        })
+        for path in researcher_p4.iterdir():
+            if path.is_file():
+                os.chmod(path, 0o600)
+    finally:
+        os.umask(previous_umask)
 
 
 def main() -> int:
@@ -1185,20 +1415,22 @@ def main() -> int:
         relationships = build_relationships(seeds, registry)
         people = active_research_people(registry, parties)
         repeat_recommenders = add_recommender_statistics(people, relationships)
+        p4_redactions, p4_quality = collect_p4_redactions(cv, recommendations, registry)
         status = "ready"
         run_id = f"run_{uuid.uuid4().hex}"
         output_root.mkdir(parents=True, exist_ok=True)
         emit_outputs(output_root, run_id, status, applications, documents, people, parties,
                      registry, relationships, candidates, repeat_recommenders,
-                     automatic_matches, input_checksums)
+                     automatic_matches, p4_redactions, p4_quality, input_checksums)
         registry["updated_at"] = now_utc()
         atomic_write_registry(registry_path, registry)
     except (csv.Error, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         logging.error("Resolution failed error=%s", type(exc).__name__)
         return 2
-    logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d repeat_recommenders=%d advisories=%d seconds=%.1f",
+    logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d repeat_recommenders=%d redactions=%d advisories=%d seconds=%.1f",
                  len(cv_paths), len(recommendation_paths), len(applications), len(documents),
-                 len(people), len(relationships), len(repeat_recommenders), len(candidates),
+                 len(people), len(relationships), len(repeat_recommenders), len(p4_redactions),
+                 len(candidates),
                  time.monotonic() - started)
     return 0
 
