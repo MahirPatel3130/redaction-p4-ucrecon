@@ -1083,6 +1083,9 @@ def collect_p4_redactions(cv: dict[str, Any], recommendations: dict[str, Any],
     """Create one analysis record per accepted redaction occurrence."""
     records: list[dict[str, Any]] = []
     seen_redaction_ids: set[str] = set()
+    source_mentions: dict[str, str] = {}
+    mention_occurrences: dict[tuple[str, str], int] = defaultdict(int)
+    disambiguated_redaction_ids = 0
     excluded_by_status: dict[str, int] = defaultdict(int)
     excluded_redactions = 0
     successful_documents = 0
@@ -1114,9 +1117,22 @@ def collect_p4_redactions(cv: dict[str, Any], recommendations: dict[str, Any],
             for redaction in redactions:
                 if not isinstance(redaction, dict):
                     raise ValueError("Successful document contains a malformed redaction")
-                redaction_id = str(redaction.get("mention_id", ""))
-                if not redaction_id or redaction_id in seen_redaction_ids:
-                    raise ValueError("Missing or duplicate redaction mention ID")
+                source_mention_id = str(redaction.get("mention_id", ""))
+                if not source_mention_id:
+                    raise ValueError("Successful redaction is missing its mention ID")
+                prior_document = source_mentions.setdefault(source_mention_id, document_id)
+                if prior_document != document_id:
+                    raise ValueError("Redaction mention ID occurs in multiple documents")
+                mention_key = (document_id, source_mention_id)
+                mention_occurrences[mention_key] += 1
+                occurrence_number = mention_occurrences[mention_key]
+                redaction_id = source_mention_id
+                if occurrence_number > 1:
+                    redaction_id = stable_id(
+                        "red", f"{document_id}|{source_mention_id}|{occurrence_number}")
+                    disambiguated_redaction_ids += 1
+                if redaction_id in seen_redaction_ids:
+                    raise ValueError("Generated duplicate redaction ID")
                 seen_redaction_ids.add(redaction_id)
                 entity_id = str(redaction.get("entity_id") or "")
                 entity = entity_lookup.get(entity_id, {})
@@ -1183,6 +1199,7 @@ def collect_p4_redactions(cv: dict[str, Any], recommendations: dict[str, Any],
         "excluded_documents_by_status": dict(sorted(excluded_by_status.items())),
         "delivered_redactions": len(records),
         "excluded_redactions": excluded_redactions,
+        "disambiguated_redaction_ids": disambiguated_redaction_ids,
         "identity_link_counts": link_counts,
     }
     return records, quality
@@ -1206,8 +1223,10 @@ and recommendation letters. Store, transfer, and use it only in an approved P4 e
 ## Joining the data
 
 Join redactions to documents with `document_id`, applications with `application_id`, and resolved
-people with `person_id`. `redaction_id` identifies one occurrence. `entity_id` groups repeated
-occurrences within a document and is not globally unique by itself.
+people with `person_id`. `redaction_id` uniquely identifies one exported occurrence. If legacy
+source records reuse a mention ID for multiple accepted values in the same document, later rows
+receive deterministic disambiguated IDs and the quality summary reports their count. `entity_id`
+groups repeated occurrences within a document and is not globally unique by itself.
 
 `identity_link_status` is `resolved` when `person_id` is available,
 `outside_v1_identity_scope` for identities not handled by direct-person resolution, and
@@ -1425,7 +1444,7 @@ def main() -> int:
         registry["updated_at"] = now_utc()
         atomic_write_registry(registry_path, registry)
     except (csv.Error, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-        logging.error("Resolution failed error=%s", type(exc).__name__)
+        logging.error("Resolution failed error=%s detail=%s", type(exc).__name__, exc)
         return 2
     logging.info("Resolution completed cv_batches=%d recommendation_batches=%d applications=%d documents=%d people=%d relationships=%d repeat_recommenders=%d redactions=%d advisories=%d seconds=%.1f",
                  len(cv_paths), len(recommendation_paths), len(applications), len(documents),
