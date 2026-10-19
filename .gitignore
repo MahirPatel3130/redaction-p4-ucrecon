@@ -3,9 +3,20 @@ outputs/
 outputs-*/
 project_run/
 relationship-results*/
+research_runs/
+research_state/
+researcher_candidate/
+researcher_p4/
+protected/
+metrics/
+checkpoints/
+model_responses/
 identity_registry.json
+organization_registry.json
+work_registry.json
 review_queue.csv
 decisions.csv
+review_sample.csv
 *.log
 
 # Python caches and local environments

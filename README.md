@@ -224,3 +224,124 @@ They are test data, not P4 data.
 - Remaining extractable email, phone, URL, DOI, or recorded entity text causes verification
   failure and the candidate PDF is withheld.
 - Inspect every page and validate sensitive strings are absent before releasing any output.
+
+## Unified CV and recommendation-letter research pipeline
+
+`build_research_dataset.py` is the current end-to-end workflow. The older redaction and
+relationship scripts above remain available for reproducibility, but they are not invoked by this
+pipeline. The unified workflow reruns Gemma, checkpoints every document, parses CV education,
+employment, and publications, de-identifies full recommendation-letter text, and retains the
+actual removed values only under the protected output tree.
+
+Create the Python 3.11 environment and authenticate once on a machine that can access the gated
+Gemma weights:
+
+```bash
+conda env create -f environment.yml
+conda activate p4-research-pipeline
+huggingface-cli login
+```
+
+The configured model must be a compatible gated Gemma vision checkpoint available in the local
+Hugging Face cache. Production runs below use offline mode so document content is never submitted
+to an external inference API.
+
+### Preflight and smoke test
+
+Preflight inventories PDFs without loading Gemma. An application with one unambiguous CV is
+processed even when its letter count differs from three; missing/multiple CV candidates and an
+unexpected letter count are explicit quality flags.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python build_research_dataset.py \
+  --input-root /protected/JPF01795/applications \
+  --input-root /protected/JPF01796/applications \
+  --input-root /protected/JPF01801/applications \
+  --output-root /protected/research_runs/economics_preflight \
+  --identity-registry /protected/relationship_state/identity_registry.json \
+  --state-root /protected/research_state \
+  --devices 0 --workers 1 --preflight-only
+
+CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python build_research_dataset.py \
+  --input-root /protected/JPF01795/applications \
+  --input-root /protected/JPF01796/applications \
+  --input-root /protected/JPF01801/applications \
+  --output-root /protected/research_runs/economics_smoke_001 \
+  --identity-registry /protected/relationship_state/identity_registry.json \
+  --state-root /protected/research_state \
+  --model google/gemma-4-31B-it \
+  --devices 0 --workers 1 --limit-applications 2 --require-review
+```
+
+Inspect the smoke run's protected QA reports, de-identified candidate records, timing file, pipeline
+log, and GPU memory before starting the complete run. A successful local mocked test is not a
+substitute for this remote GPU smoke test.
+
+### Full, resumable GPU run
+
+Use a new output directory for a new run. One worker loads one model on one GPU. To scale later,
+use a matching device/worker count such as `--devices 0,1 --workers 2`.
+
+```bash
+tmux new -s economics-research
+cd ~/redaction-p4-ucrecon
+conda activate p4-research-pipeline
+CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 python build_research_dataset.py \
+  --input-root /protected/JPF01795/applications \
+  --input-root /protected/JPF01796/applications \
+  --input-root /protected/JPF01801/applications \
+  --output-root /protected/research_runs/economics_run_001 \
+  --identity-registry /protected/relationship_state/identity_registry.json \
+  --state-root /protected/research_state \
+  --model google/gemma-4-31B-it \
+  --devices 0 --workers 1 --require-review
+```
+
+Detach with `Ctrl-b d`, reattach with `tmux attach -t economics-research`, and follow only the
+non-sensitive operational log with:
+
+```bash
+tail -f /protected/research_runs/economics_run_001/metrics/pipeline.log
+```
+
+After an interruption, run the identical command with `--resume`. Add `--retry-failed` to retry
+failed checkpoints; successful matching checkpoints are reused only when their PDF checksum,
+model, prompt version, DPI, and worker configuration remain compatible.
+
+### Review and release
+
+With `--require-review`, output is written to `researcher_candidate/`, never directly to the final
+delivery directory. Review every row in `protected/review_sample.csv` (10 percent, at least 20
+documents, or all documents when fewer than 20 exist), enter `pass` in `review_decision`, then run:
+
+```bash
+python build_research_dataset.py \
+  --output-root /protected/research_runs/economics_run_001 \
+  --finalize-review /protected/research_runs/economics_run_001/protected/review_sample.csv
+```
+
+This creates `researcher/` with `release_status: ready`. Any sampled failure should be investigated
+and corrected in a new run; finalization intentionally refuses incomplete or failed decisions.
+
+The standard researcher directory contains opaque IDs, CV profiles and normalized section tables,
+de-identified recommendation-letter text with `[[PAGE:n]]` markers, relationship tables, quality
+metadata, a data dictionary, and checksums. It excludes original names, organizations, publication
+titles, contact values, paths, filenames, geometry, model responses, and replacement mappings.
+
+`protected/` is P4-sensitive and owner-readable only. It contains actual removed values,
+replacement maps, raw text/structured extraction, checkpoints, and QA reports. Retain it inside the
+P4 environment; it is the source for a later explicitly authorized P4 attachment without another
+Gemma run. The unified pipeline deliberately does not create `researcher_p4/` automatically.
+
+To transfer only the final de-identified deliverable from the remote host:
+
+```bash
+scp -i ~/.ssh/YOUR_PRIVATE_KEY -r \
+  USER@REMOTE_HOST:/protected/research_runs/economics_run_001/researcher \
+  ./economics_researcher_dataset
+```
+
+Performance estimates are in `metrics/run_summary.json`; per-document stage timings are available
+as JSONL and CSV. Projections for one through four GPU workers are linear planning estimates, not
+benchmark guarantees. Logs and timing files contain only opaque IDs, counts, durations, statuses,
+and non-sensitive failure codes.
