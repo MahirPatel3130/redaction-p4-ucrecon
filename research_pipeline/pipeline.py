@@ -349,7 +349,9 @@ def _worker_loop(worker_id: int, device: str, config: dict[str, Any], task_queue
     try:
         model = create_model(config["model"])
     except Exception as exc:
-        result_queue.put({"worker_error": type(exc).__name__, "worker_id": worker_id})
+        result_queue.put({"worker_error": type(exc).__name__, "worker_id": worker_id,
+                          "gpu_id": device, "failure_stage": "model_initialization",
+                          "detail": str(exc)[:1000]})
         return
     while True:
         task = task_queue.get()
@@ -396,13 +398,23 @@ def extract_documents(tasks: list[dict[str, Any]], config: dict[str, Any],
             message = result_queue.get()
             if "worker_error" in message:
                 errors.append(message)
+                logging.error(
+                    "Model worker failed worker_id=%s gpu_id=%s stage=%s error=%s detail=%s",
+                    message.get("worker_id"), message.get("gpu_id"),
+                    message.get("failure_stage"), message.get("worker_error"),
+                    message.get("detail", "unavailable"))
                 break
             completed += 1
             logging.info("Document extraction completed document_id=%s status=%s",
                          message["document_id"], message["status"])
         for process in workers:
             process.join()
-        if errors or any(process.exitcode != 0 for process in workers):
+        bad_exits = [{"pid": process.pid, "exit_code": process.exitcode}
+                     for process in workers if process.exitcode != 0]
+        for bad_exit in bad_exits:
+            logging.error("Model worker exited unexpectedly pid=%s exit_code=%s",
+                          bad_exit["pid"], bad_exit["exit_code"])
+        if errors or bad_exits:
             raise RuntimeError("One or more model workers failed")
     return [json.loads((checkpoint_root / f"{task['document_id']}.json").read_text(encoding="utf-8"))
             for task in tasks]
