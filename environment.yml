@@ -6,9 +6,12 @@ dependencies:
   - pip
   - pip:
       - torch==2.13.0
+      - torchvision==0.28.0
       - transformers==5.16.1
       - accelerate==1.13.0
       - huggingface-hub==1.29.0
       - safetensors==0.8.0
+      - sentencepiece==0.2.1
+      - protobuf==7.34.1
       - pillow==12.2.0
       - pymupdf==1.28.2
