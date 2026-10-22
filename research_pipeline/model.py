@@ -60,7 +60,10 @@ QA_PROMPT = """Review this de-identified academic document for remaining direct 
 identifiers. Placeholders such as [[PERSON:...]], [[ORG:...]], and [[WORK:...]] are safe. Return JSON
 only: {"qa_passed":true,"model_confidence":0.0,"flagged_spans":[{"text":"exact remaining
 identifier","identifier_type":"person|organization|work|contact|address|date|other"}]}.
-Be conservative. Do not rewrite the document. Prompt version: %s.\nDOCUMENT:\n""" % PROMPT_VERSION
+Publication years, five-year date buckets, controlled job categories, academic fields, research
+fields, and research methods are intentionally retained and are safe. Do not flag opaque IDs or
+approved placeholders. Every flagged span must be an exact substring of the document. Be
+conservative. Do not rewrite the document. Prompt version: %s.\nDOCUMENT:\n""" % PROMPT_VERSION
 
 
 def extract_json(raw: str) -> dict[str, Any]:
@@ -118,7 +121,13 @@ class GemmaModel:
         for attempt in range(2):
             started = time.monotonic()
             self.calls += 1
-            result = self.pipe(messages, return_full_text=False,
+            attempt_messages = messages
+            if attempt:
+                attempt_messages = [{"role": "user", "content": content + [{
+                    "type": "text", "text": ("Your previous response was not valid JSON. "
+                    "Return a shorter response matching the requested schema exactly. JSON only.")
+                }]}]
+            result = self.pipe(attempt_messages, return_full_text=False,
                                generate_kwargs={"max_new_tokens": max_tokens, "do_sample": False})
             self.inference_seconds += time.monotonic() - started
             raw = response_text(result)

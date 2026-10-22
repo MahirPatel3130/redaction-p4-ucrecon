@@ -124,14 +124,22 @@ def provisional_deidentify(text: str, entities: list[dict[str, Any]]) -> str:
     return text
 
 
-def validate_entity(entity: dict[str, Any], page: int, page_text: str = "") -> dict[str, Any]:
+def safe_confidence(value: Any) -> float | None:
+    try:
+        return valid_confidence(value, required=False)
+    except ValueError:
+        return None
+
+
+def validate_entity(entity: dict[str, Any], page: int | None,
+                    page_text: str = "") -> dict[str, Any] | None:
     if not isinstance(entity, dict):
-        raise ValueError("Malformed model entity")
+        return None
     kind = str(entity.get("identifier_type", ""))
     raw = str(entity.get("text", "")).strip()
     if not kind or not raw:
-        raise ValueError("Model entity is missing type or text")
-    confidence = valid_confidence(entity.get("model_confidence"), required=False)
+        return None
+    confidence = safe_confidence(entity.get("model_confidence"))
     box = entity.get("bbox_normalized")
     if box is not None:
         if not isinstance(box, list) or len(box) != 4:
@@ -172,7 +180,7 @@ def validate_field(value: Any) -> dict[str, Any]:
     status = str(value.get("status", "model_failed"))
     if status not in FIELD_STATUSES:
         status = "model_failed"
-    confidence = valid_confidence(value.get("model_confidence"), required=False)
+    confidence = safe_confidence(value.get("model_confidence"))
     if status == "model_failed":
         confidence = None
     return {"value": value.get("value"), "status": status, "model_confidence": confidence}
@@ -185,7 +193,7 @@ def validate_section(value: Any, name: str) -> dict[str, Any]:
     status = str(value.get("status", "model_failed"))
     if status not in SECTION_STATUSES:
         status = "model_failed"
-    confidence = valid_confidence(value.get("model_confidence"), required=False)
+    confidence = safe_confidence(value.get("model_confidence"))
     if status == "model_failed":
         confidence = None
     items = value.get("items", [])
@@ -202,8 +210,7 @@ def validate_section(value: Any, name: str) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         row = {key: validate_field(item.get(key)) for key in expected}
-        row["item_model_confidence"] = valid_confidence(
-            item.get("item_model_confidence"), required=False)
+        row["item_model_confidence"] = safe_confidence(item.get("item_model_confidence"))
         row["source_page"] = item.get("source_page")
         if name == "publications":
             authors = []
@@ -212,8 +219,8 @@ def validate_section(value: Any, name: str) -> dict[str, Any]:
                     authors.append({"name": validate_field(author.get("name")),
                                     "author_position": author.get("author_position"),
                                     "is_applicant": bool(author.get("is_applicant", False)),
-                                    "model_confidence": valid_confidence(
-                                        author.get("model_confidence"), required=False)})
+                                    "model_confidence": safe_confidence(
+                                        author.get("model_confidence"))})
             row["authors"] = authors
         validated.append(row)
     result = {"status": status, "model_confidence": confidence, "items": validated}
@@ -225,6 +232,32 @@ def validate_section(value: Any, name: str) -> dict[str, Any]:
     return result
 
 
+def fallback_consolidate(page_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Lossless page-level fallback; it never invents semantic confidence."""
+    result: dict[str, Any] = {"sections": {}, "research_fields": [], "methods": []}
+    for name in SECTION_NAMES:
+        items = [item for page in page_results
+                 for item in page.get("sections", {}).get(name, {}).get("items", [])]
+        if items:
+            result["sections"][name] = {
+                "status": "found", "model_confidence": None, "items": items,
+                "validation_flags": ["deterministic_page_merge_fallback"],
+            }
+        else:
+            statuses = [page.get("sections", {}).get(name, {}).get("status")
+                        for page in page_results]
+            status = "uncertain" if "uncertain" in statuses else "not_found"
+            result["sections"][name] = {
+                "status": status, "model_confidence": None, "items": [],
+                "not_found_reason": "No page-level items were recovered",
+                "validation_flags": ["deterministic_page_merge_fallback"],
+            }
+    result["research_fields"] = [item for page in page_results
+                                 for item in page.get("research_fields", [])]
+    result["methods"] = [item for page in page_results for item in page.get("methods", [])]
+    return result
+
+
 def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
                      checkpoint_path: Path, debug_path: Path | None) -> dict[str, Any]:
     import pymupdf
@@ -233,6 +266,7 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
     total_started = time.monotonic()
     render_seconds = extraction_seconds = consolidation_seconds = qa_seconds = 0.0
     native_pages = scanned_pages = 0
+    failure_stage = "pdf_open"
     raw: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "config_hash": config["config_hash"],
                            **task, "status": "failed", "pages": []}
     try:
@@ -244,6 +278,7 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
             letter_parts = []
             for page_index, page in enumerate(document):
                 page_number = page_index + 1
+                failure_stage = f"page_{page_number}_text_extraction"
                 started = time.monotonic()
                 native_text = page.get_text("text", sort=True)
                 extraction_seconds += time.monotonic() - started
@@ -251,36 +286,67 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
                 native_pages += int(reliable)
                 scanned_pages += int(not reliable)
                 started = time.monotonic()
+                failure_stage = f"page_{page_number}_rendering"
                 image = render_page(page, config["dpi"])
                 render_seconds += time.monotonic() - started
                 if task["document_type"] == "cv":
-                    result = model.parse_cv_page(image, native_text if reliable else "", page_number)
+                    failure_stage = f"page_{page_number}_cv_parsing"
+                    try:
+                        result = model.parse_cv_page(
+                            image, native_text if reliable else "", page_number)
+                    except ValueError:
+                        result = {"sections": {
+                            name: {"status": "model_failed", "model_confidence": None,
+                                   "items": [], "failure_code": "malformed_page_json"}
+                            for name in SECTION_NAMES},
+                            "research_fields": [], "methods": [], "identifiers": []}
+                        raw.setdefault("validation_flags", []).append(
+                            f"page_{page_number}_model_json_failed")
                     sections = result.get("sections", {}) if isinstance(result, dict) else {}
                     validated_page = {"page": page_number, "sections": {
                         name: validate_section(sections.get(name), name) for name in SECTION_NAMES},
                         "research_fields": result.get("research_fields", []),
                         "methods": result.get("methods", []), "identifiers": []}
-                    for entity in result.get("identifiers", []):
-                        validated_page["identifiers"].append(
-                            validate_entity(entity, page_number, native_text))
+                    model_entities = result.get("identifiers", [])
+                    for entity in model_entities if isinstance(model_entities, list) else []:
+                        validated = validate_entity(entity, page_number, native_text)
+                        if validated:
+                            validated_page["identifiers"].append(validated)
                     page_results.append(validated_page)
                     all_entities.extend(validated_page["identifiers"])
                 else:
+                    failure_stage = f"page_{page_number}_letter_analysis"
                     if not reliable:
-                        transcript = model.transcribe(image)
-                        transcript_confidence = valid_confidence(
-                            transcript.get("model_confidence"), required=False)
+                        try:
+                            transcript = model.transcribe(image)
+                        except ValueError:
+                            transcript = {"text": "", "status": "model_failed",
+                                          "model_confidence": None}
+                            raw.setdefault("validation_flags", []).append(
+                                f"page_{page_number}_transcription_json_failed")
+                        transcript_confidence = safe_confidence(
+                            transcript.get("model_confidence"))
                         native_text = str(transcript.get("text", ""))
                     else:
                         transcript_confidence = None
-                    result = model.analyze_letter_page(image, native_text, page_number)
+                    try:
+                        result = model.analyze_letter_page(image, native_text, page_number)
+                    except ValueError:
+                        result = {"transcript": {"text": native_text,
+                                                  "status": "uncertain",
+                                                  "model_confidence": None},
+                                  "entities": []}
+                        raw.setdefault("validation_flags", []).append(
+                            f"page_{page_number}_model_json_failed")
                     transcript = result.get("transcript", {}) if isinstance(result, dict) else {}
                     page_text = str(transcript.get("text", native_text))
-                    confidence = valid_confidence(transcript.get("model_confidence"), required=False)
-                    entities = [validate_entity(entity, page_number, page_text)
-                                for entity in result.get("entities", [])]
-                    entities.extend(validate_entity(entity, page_number, page_text)
-                                    for entity in deterministic_identifiers(page_text))
+                    confidence = safe_confidence(transcript.get("model_confidence"))
+                    model_entities = result.get("entities", [])
+                    entities = [validated for entity in (
+                                    model_entities if isinstance(model_entities, list) else [])
+                                if (validated := validate_entity(entity, page_number, page_text))]
+                    entities.extend(validated for entity in deterministic_identifiers(page_text)
+                                    if (validated := validate_entity(entity, page_number, page_text)))
                     entities = deduplicate_entities(entities)
                     page_results.append({"page": page_number, "text": page_text,
                                          "transcription_source": "pdf_text" if reliable else "gemma_vision",
@@ -290,8 +356,14 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
                     all_entities.extend(entities)
                     letter_parts.append(f"[[PAGE:{page_number}]]\n\n{page_text.strip()}")
             if task["document_type"] == "cv":
+                failure_stage = "cv_consolidation"
                 started = time.monotonic()
-                consolidated = model.consolidate_cv(page_results)
+                try:
+                    consolidated = model.consolidate_cv(page_results)
+                except ValueError:
+                    consolidated = fallback_consolidate(page_results)
+                    raw.setdefault("validation_flags", []).append(
+                        "cv_consolidation_model_json_failed")
                 consolidation_seconds += time.monotonic() - started
                 sections = consolidated.get("sections", {}) if isinstance(consolidated, dict) else {}
                 raw["cv_parse"] = {"sections": {
@@ -307,11 +379,15 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
                 raw["page_transcription"] = page_results
                 provisional = provisional_deidentify(raw["letter_text"], raw["identifiers"])
             started = time.monotonic()
-            qa = model.qa(provisional)
+            failure_stage = "privacy_qa"
+            try:
+                qa = model.qa(provisional)
+            except ValueError:
+                qa = {"qa_passed": False, "model_confidence": None,
+                      "flagged_spans": [], "failure_code": "malformed_qa_json"}
             qa_seconds += time.monotonic() - started
             raw["privacy_qa"] = {"qa_passed": bool(qa.get("qa_passed", False)),
-                                 "model_confidence": valid_confidence(
-                                     qa.get("model_confidence"), required=False),
+                                 "model_confidence": safe_confidence(qa.get("model_confidence")),
                                  "flagged_count": len(qa.get("flagged_spans", []))
                                  if isinstance(qa.get("flagged_spans", []), list) else 0}
             raw["status"] = "extracted"
@@ -320,6 +396,7 @@ def process_document(task: dict[str, Any], config: dict[str, Any], model: Any,
     except Exception as exc:
         raw["status"] = "failed"
         raw["failure_code"] = type(exc).__name__
+        raw["failure_stage"] = failure_stage
     raw["timing"] = {
         "application_id": task["application_id"], "document_id": task["document_id"],
         "document_type": task["document_type"], "page_count": raw.get("page_count", 0),
@@ -418,6 +495,102 @@ def extract_documents(tasks: list[dict[str, Any]], config: dict[str, Any],
             raise RuntimeError("One or more model workers failed")
     return [json.loads((checkpoint_root / f"{task['document_id']}.json").read_text(encoding="utf-8"))
             for task in tasks]
+
+
+def _qa_identifier_type(value: str, raw: str) -> str:
+    value = value.strip().casefold()
+    if value == "person": return "person_name"
+    if value == "organization": return "organization"
+    if value == "work": return "work_title"
+    if value == "address": return "postal_address"
+    if value == "date": return "date"
+    if value == "contact":
+        detected = deterministic_identifiers(raw)
+        return detected[0]["identifier_type"] if detected else "other_identifying_data"
+    return "other_identifying_data"
+
+
+def _page_for_span(extraction: dict[str, Any], span: str) -> int | None:
+    for page in extraction.get("page_transcription", []):
+        if span.casefold() in str(page.get("text", "")).casefold():
+            return page.get("page")
+    return None
+
+
+def repair_privacy_qa(extractions: list[dict[str, Any]], config: dict[str, Any]) -> int:
+    """Rerun only failed privacy QA and turn exact grounded findings into redactions."""
+    candidates = [row for row in extractions if row.get("status") == "extracted"
+                  and (not row.get("privacy_qa", {}).get("qa_passed")
+                       or row.get("privacy_qa", {}).get("flagged_count", 0))]
+    if not candidates:
+        return 0
+    os.environ["CUDA_VISIBLE_DEVICES"] = config["devices"][0]
+    model = create_model(config["model"])
+    repaired = 0
+    for extraction in candidates:
+        model.reset_metrics()
+        if extraction["document_type"] == "cv":
+            source = json.dumps(extraction.get("cv_parse", {}), ensure_ascii=False)
+        else:
+            source = extraction.get("letter_text", "")
+        provisional = provisional_deidentify(source, extraction.get("identifiers", []))
+        try:
+            first = model.qa(provisional)
+        except ValueError:
+            first = {"qa_passed": False, "model_confidence": None,
+                     "flagged_spans": [], "failure_code": "malformed_qa_json"}
+        additions = []
+        unresolved = 0
+        for item in first.get("flagged_spans", []) if isinstance(first, dict) else []:
+            if not isinstance(item, dict):
+                unresolved += 1
+                continue
+            span = str(item.get("text", "")).strip()
+            if (not span or span.casefold() not in provisional.casefold()
+                    or span.casefold() not in source.casefold()):
+                unresolved += 1
+                continue
+            kind = _qa_identifier_type(str(item.get("identifier_type", "other")), span)
+            additions.append({"identifier_type": kind, "person_role": "unknown",
+                              "text": span, "model_confidence": safe_confidence(
+                                  first.get("model_confidence")),
+                              "bbox_normalized": None,
+                              "page": _page_for_span(extraction, span),
+                              "detection_source": "gemma_privacy_qa",
+                              "source_grounded": True})
+        additions = deduplicate_entities(additions)
+        extraction["identifiers"] = deduplicate_entities(
+            extraction.get("identifiers", []) + additions)
+        remediated = provisional_deidentify(source, extraction["identifiers"])
+        if additions:
+            try:
+                final = model.qa(remediated)
+            except ValueError:
+                final = {"qa_passed": False, "model_confidence": None,
+                         "flagged_spans": [], "failure_code": "malformed_qa_json"}
+        else:
+            final = first
+        flagged = final.get("flagged_spans", []) if isinstance(final, dict) else []
+        extraction["privacy_qa"] = {
+            "qa_passed": bool(final.get("qa_passed", False)) and unresolved == 0,
+            "model_confidence": safe_confidence(final.get("model_confidence")),
+            "flagged_count": len(flagged) if isinstance(flagged, list) else 0,
+            "remediated_span_count": len(additions),
+            "unresolved_span_count": unresolved,
+        }
+        extraction.setdefault("timing", {})["qa_repair_model_calls"] = model.calls
+        extraction["timing"]["qa_repair_seconds"] = round(model.inference_seconds, 3)
+        checkpoint = Path(config["checkpoint_root"]) / f"{extraction['document_id']}.json"
+        atomic_json(checkpoint, extraction)
+        if config.get("debug_artifacts"):
+            write_json(Path(config["debug_root"]) /
+                       f"{extraction['document_id']}.qa-repair.model.json",
+                       {"responses": model.raw_responses}, mode=0o600)
+        repaired += 1
+        logging.info("Privacy QA repaired document_id=%s additions=%d final_pass=%s",
+                     extraction["document_id"], len(additions),
+                     extraction["privacy_qa"]["qa_passed"])
+    return repaired
 
 
 def _raw_field(field: Any) -> Any:
@@ -729,7 +902,16 @@ def package_dataset(applications: list[dict[str, Any]], extractions: list[dict[s
             replacements_by_document[extraction["document_id"]] = build_replacements(
                 extraction, resolved)
     redactions = [row for _, rows in replacements_by_document.values() for row in rows]
-    protected_aliases = [row["text"] for row in redactions]
+    aliases_by_document: dict[str, list[str]] = defaultdict(list)
+    aliases_by_application: dict[str, list[str]] = defaultdict(list)
+    cross_document_types = {"person_name", "email", "phone_number", "website",
+                            "postal_address", "unique_identifier"}
+    for row in redactions:
+        if row["identifier_category"] == "date":
+            continue
+        aliases_by_document[row["document_id"]].append(row["text"])
+        if row["identifier_category"] in cross_document_types:
+            aliases_by_application[row["application_id"]].append(row["text"])
     withhold_count = 0
     for extraction in extractions:
         deidentification_started = time.monotonic()
@@ -742,6 +924,8 @@ def package_dataset(applications: list[dict[str, Any]], extractions: list[dict[s
             withhold_count += 1
             continue
         replacements, document_redactions = replacements_by_document[doc_id]
+        protected_aliases = (aliases_by_document[doc_id]
+                             + aliases_by_application[extraction["application_id"]])
         write_json(protected / "replacement_maps" / f"{doc_id}.json",
                    {"document_id": doc_id, "replacements": document_redactions}, mode=0o600)
         if extraction["document_type"] == "recommendation_letter":

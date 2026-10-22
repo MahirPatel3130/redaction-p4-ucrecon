@@ -13,7 +13,7 @@ from research_pipeline import PROMPT_VERSION, SCHEMA_VERSION
 from research_pipeline.common import atomic_json, config_hash
 from research_pipeline.pipeline import (
     discover, extract_documents, finalize_review, package_dataset, resolve_entities,
-    select_review_sample, write_manifest, write_metrics,
+    repair_privacy_qa, select_review_sample, write_manifest, write_metrics,
 )
 
 
@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-applications", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--repair-qa", action="store_true",
+                        help="Rerun privacy QA only where prior QA failed and redact grounded spans")
     parser.add_argument("--require-review", action="store_true")
     parser.add_argument("--finalize-review", type=Path)
     parser.add_argument("--debug-artifacts", action="store_true")
@@ -133,6 +135,10 @@ def main() -> int:
                          "debug_root": str(protected / "model_responses"),
                          "debug_artifacts": args.debug_artifacts}
         extractions = extract_documents(tasks, worker_config, args.resume, args.retry_failed)
+        if args.repair_qa:
+            repaired = repair_privacy_qa(extractions, worker_config)
+            logging.info("Privacy QA repair completed documents=%d", repaired)
+            extractions = extract_documents(tasks, worker_config, True, False)
         resolved = resolve_entities(extractions, args.identity_registry.resolve(),
                                     args.state_root.resolve())
         package = package_dataset(applications, extractions, resolved, args.output_root,

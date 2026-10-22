@@ -8,12 +8,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pymupdf
 
-from research_pipeline.common import five_year_bucket, replace_aliases, timing_statistics
+from research_pipeline.common import five_year_bucket, leakage_findings, replace_aliases, timing_statistics
 from research_pipeline.model import GemmaModel, MockModel, extract_json
-from research_pipeline.pipeline import deduplicate_entities, process_document, validate_section
+from research_pipeline.pipeline import (
+    deduplicate_entities, process_document, repair_privacy_qa, validate_section,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +44,11 @@ class CommonTests(unittest.TestCase):
         result = timing_statistics([1.0, 2.0, 3.0])
         self.assertEqual(result["median"], 2.0)
         self.assertEqual(result["total"], 6.0)
+
+    def test_publication_year_is_not_alias_leakage(self) -> None:
+        self.assertEqual(leakage_findings("Published in 2023", ["2023"]), [])
+        self.assertEqual(leakage_findings(
+            '{"person_id":"person_1234567890123456abcdef"}', []), [])
 
     def test_model_json_and_explicit_failure(self) -> None:
         self.assertEqual(extract_json("```json\n{\"ok\": true}\n```"), {"ok": True})
@@ -71,6 +79,42 @@ class CommonTests(unittest.TestCase):
 
 
 class EndToEndMockTests(unittest.TestCase):
+    def test_qa_only_repair_redacts_grounded_span(self) -> None:
+        class RepairModel(MockModel):
+            def qa(self, text):
+                self.calls += 1
+                if "Secret Person" in text:
+                    return {"qa_passed": False, "model_confidence": 1.0,
+                            "flagged_spans": [{"text": "Secret Person",
+                                               "identifier_type": "person"}]}
+                return {"qa_passed": True, "model_confidence": 1.0,
+                        "flagged_spans": []}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoints = root / "checkpoints"; checkpoints.mkdir()
+            debug = root / "debug"; debug.mkdir()
+            extraction = {
+                "status": "extracted", "application_id": "app_test",
+                "document_id": "doc_test", "document_type": "recommendation_letter",
+                "letter_text": "Applicant Alice recommends Secret Person.",
+                "identifiers": [{"identifier_type": "person_name",
+                                  "person_role": "applicant", "text": "Applicant Alice",
+                                  "page": 1, "detection_source": "gemma",
+                                  "source_grounded": True, "model_confidence": 1.0}],
+                "page_transcription": [{"page": 1,
+                                         "text": "Applicant Alice recommends Secret Person."}],
+                "privacy_qa": {"qa_passed": False, "model_confidence": 1.0,
+                               "flagged_count": 1}, "timing": {},
+            }
+            config = {"model": "mock", "devices": ["0"],
+                      "checkpoint_root": str(checkpoints), "debug_root": str(debug),
+                      "debug_artifacts": False}
+            with mock.patch("research_pipeline.pipeline.create_model", return_value=RepairModel()):
+                self.assertEqual(repair_privacy_qa([extraction], config), 1)
+            self.assertTrue(extraction["privacy_qa"]["qa_passed"])
+            self.assertIn("Secret Person", [item["text"] for item in extraction["identifiers"]])
+
     def test_scanned_page_uses_confident_transcription(self) -> None:
         class ScannedModel(MockModel):
             def transcribe(self, image):

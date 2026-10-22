@@ -308,6 +308,13 @@ After an interruption, run the identical command with `--resume`. Add `--retry-f
 failed checkpoints; successful matching checkpoints are reused only when their PDF checksum,
 model, prompt version, DPI, and worker configuration remain compatible.
 
+For a completed run with privacy-QA findings, add `--repair-qa` to the identical resume command.
+This reuses page extraction, reruns QA only for affected successful documents, grounds exact QA
+findings into additional protected redactions, performs a second privacy pass, and rebuilds the
+candidate package. It can be combined with `--retry-failed`; successful extraction checkpoints are
+never repeated. The deterministic leakage validator is document/application scoped and excludes
+intentionally retained publication years rather than comparing every document with global aliases.
+
 ### Review and release
 
 With `--require-review`, output is written to `researcher_candidate/`, never directly to the final

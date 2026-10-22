@@ -262,14 +262,18 @@ def deterministic_identifiers(text: str) -> list[dict[str, Any]]:
 
 def leakage_findings(text: str, protected_aliases: Iterable[str]) -> list[str]:
     findings = []
+    scan_text = re.sub(r"\[\[[^\]]+\]\]", " ", text)
+    scan_text = re.sub(
+        r"\b(?:person|org|work|doc|app|rel|education|employment|publication|mention|entity)_[0-9a-f]+\b",
+        " ", scan_text, flags=re.IGNORECASE)
     for label, pattern in (("email", EMAIL_RE), ("phone", PHONE_RE),
                            ("url", URL_RE), ("doi", DOI_RE)):
-        if pattern.search(text):
+        if pattern.search(scan_text):
             findings.append(f"remaining_{label}")
     folded = text.casefold()
     for alias in protected_aliases:
         alias = compact(alias)
-        if len(alias) >= 4 and alias.casefold() in folded:
+        if len(alias) >= 4 and not alias.isdigit() and alias.casefold() in folded:
             findings.append("remaining_protected_alias")
             break
     return sorted(set(findings))
