@@ -519,6 +519,21 @@ def _page_for_span(extraction: dict[str, Any], span: str) -> int | None:
 
 def repair_privacy_qa(extractions: list[dict[str, Any]], config: dict[str, Any]) -> int:
     """Rerun only failed privacy QA and turn exact grounded findings into redactions."""
+    for row in extractions:
+        has_complete_payload = (
+            row.get("document_type") == "cv" and isinstance(row.get("cv_parse"), dict)
+            or row.get("document_type") == "recommendation_letter"
+            and isinstance(row.get("letter_text"), str) and bool(row.get("letter_text")))
+        if row.get("status") == "failed" and has_complete_payload and row.get("identifiers") is not None:
+            row["previous_failure_code"] = row.get("failure_code")
+            row["previous_failure_stage"] = row.get("failure_stage", "privacy_qa_or_later")
+            row.pop("failure_code", None)
+            row.pop("failure_stage", None)
+            row["status"] = "extracted"
+            row["privacy_qa"] = {"qa_passed": False, "model_confidence": None,
+                                 "flagged_count": 0, "salvaged_for_qa_repair": True}
+            row.setdefault("timing", {})["status"] = "extracted"
+            row["timing"]["failure_code"] = None
     candidates = [row for row in extractions if row.get("status") == "extracted"
                   and (not row.get("privacy_qa", {}).get("qa_passed")
                        or row.get("privacy_qa", {}).get("flagged_count", 0))]

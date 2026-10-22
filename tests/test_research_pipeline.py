@@ -95,7 +95,8 @@ class EndToEndMockTests(unittest.TestCase):
             checkpoints = root / "checkpoints"; checkpoints.mkdir()
             debug = root / "debug"; debug.mkdir()
             extraction = {
-                "status": "extracted", "application_id": "app_test",
+                "status": "failed", "failure_code": "ValueError",
+                "application_id": "app_test",
                 "document_id": "doc_test", "document_type": "recommendation_letter",
                 "letter_text": "Applicant Alice recommends Secret Person.",
                 "identifiers": [{"identifier_type": "person_name",
@@ -113,6 +114,8 @@ class EndToEndMockTests(unittest.TestCase):
             with mock.patch("research_pipeline.pipeline.create_model", return_value=RepairModel()):
                 self.assertEqual(repair_privacy_qa([extraction], config), 1)
             self.assertTrue(extraction["privacy_qa"]["qa_passed"])
+            self.assertEqual(extraction["status"], "extracted")
+            self.assertEqual(extraction["previous_failure_code"], "ValueError")
             self.assertIn("Secret Person", [item["text"] for item in extraction["identifiers"]])
 
     def test_scanned_page_uses_confident_transcription(self) -> None:
