@@ -406,7 +406,7 @@ def extract_cv(document: CanonicalDocument, backend: InferenceBackend,
     # Dense publication lists expand substantially in the structured response. Keep CV
     # chunks bounded even when the model has a large input context so generation cannot
     # consume the entire output budget before closing the JSON object.
-    cv_chunk_chars = max(8000, min(24000, int((context_length - max_tokens - 2048) * 2.5)))
+    cv_chunk_chars = max(4000, min(8000, int((context_length - max_tokens - 2048) * 2.5)))
     chunks = _chunks(document.text, cv_chunk_chars)
     responses = []
     raw_chunks = []

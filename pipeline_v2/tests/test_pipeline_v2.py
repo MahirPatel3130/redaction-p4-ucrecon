@@ -17,7 +17,7 @@ from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
 from academic_pipeline_v2.models import DocumentRecord, DocumentType
 from academic_pipeline_v2.models import CanonicalDocument, CanonicalPage, ModelResponse, ValueStatus
-from academic_pipeline_v2.privacy import validate_privacy
+from academic_pipeline_v2.privacy import RawPrivacyReview, validate_privacy
 from academic_pipeline_v2.pipeline import (
     export_candidate_stage, finalize_review_stage, inventory_stage, process_stage, release_stage,
 )
@@ -292,3 +292,8 @@ def test_privacy_model_finding_is_automatically_repaired() -> None:
     assert "[[PRIVACY_REPAIR]]" in repaired
     assert metrics["repairs"] == 1
     assert redactions[0]["detector"] == "privacy_repair"
+
+
+def test_privacy_review_schema_bounds_findings() -> None:
+    schema = RawPrivacyReview.model_json_schema()
+    assert schema["properties"]["findings"]["maxItems"] == 50

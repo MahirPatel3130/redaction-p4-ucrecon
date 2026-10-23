@@ -25,7 +25,9 @@ class RawPrivacyReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     safe: bool
     model_confidence: float | None = Field(default=None, ge=0, le=1)
-    findings: list[RawPrivacyFinding] = Field(default_factory=list)
+    # Bound each pass so constrained decoding closes the JSON object within its budget.
+    # Additional findings are handled by the existing iterative repair loop.
+    findings: list[RawPrivacyFinding] = Field(default_factory=list, max_length=50)
 
 
 PRIORITY = {
