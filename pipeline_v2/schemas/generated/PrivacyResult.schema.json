@@ -1,0 +1,144 @@
+{
+  "$defs": {
+    "PrivacyFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "finding_type": {
+          "title": "Finding Type",
+          "type": "string"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "detector": {
+          "enum": [
+            "substitution",
+            "regex",
+            "alias",
+            "model",
+            "package"
+          ],
+          "title": "Detector",
+          "type": "string"
+        },
+        "grounded": {
+          "default": false,
+          "title": "Grounded",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "finding_type",
+        "detector"
+      ],
+      "title": "PrivacyFinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "release_status": {
+      "enum": [
+        "released",
+        "withheld"
+      ],
+      "title": "Release Status",
+      "type": "string"
+    },
+    "reason_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/PrivacyFinding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "replacement_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Replacement Count",
+      "type": "integer"
+    },
+    "repair_attempts": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Repair Attempts",
+      "type": "integer"
+    },
+    "model_qa_confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Qa Confidence"
+    },
+    "content_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Content Sha256"
+    }
+  },
+  "required": [
+    "application_id",
+    "document_id",
+    "release_status"
+  ],
+  "title": "PrivacyResult",
+  "type": "object"
+}

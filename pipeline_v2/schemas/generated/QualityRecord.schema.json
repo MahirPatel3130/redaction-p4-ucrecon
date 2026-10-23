@@ -1,0 +1,77 @@
+{
+  "$defs": {
+    "DocumentType": {
+      "enum": [
+        "cv",
+        "recommendation_letter"
+      ],
+      "title": "DocumentType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "document_type": {
+      "$ref": "#/$defs/DocumentType"
+    },
+    "processing_status": {
+      "title": "Processing Status",
+      "type": "string"
+    },
+    "extraction_status": {
+      "title": "Extraction Status",
+      "type": "string"
+    },
+    "privacy_status": {
+      "title": "Privacy Status",
+      "type": "string"
+    },
+    "release_status": {
+      "title": "Release Status",
+      "type": "string"
+    },
+    "repair_count": {
+      "default": 0,
+      "title": "Repair Count",
+      "type": "integer"
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "validation_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Validation Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "application_id",
+    "document_id",
+    "document_type",
+    "processing_status",
+    "extraction_status",
+    "privacy_status",
+    "release_status"
+  ],
+  "title": "QualityRecord",
+  "type": "object"
+}

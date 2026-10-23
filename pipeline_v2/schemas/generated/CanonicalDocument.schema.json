@@ -1,0 +1,255 @@
+{
+  "$defs": {
+    "CanonicalPage": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "document_start": {
+          "minimum": 0,
+          "title": "Document Start",
+          "type": "integer"
+        },
+        "document_end": {
+          "minimum": 0,
+          "title": "Document End",
+          "type": "integer"
+        },
+        "extraction_method": {
+          "enum": [
+            "native",
+            "ocr",
+            "failed"
+          ],
+          "title": "Extraction Method",
+          "type": "string"
+        },
+        "extraction_status": {
+          "$ref": "#/$defs/ValueStatus"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/TextBlock"
+          },
+          "title": "Blocks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "page",
+        "text",
+        "document_start",
+        "document_end",
+        "extraction_method",
+        "extraction_status"
+      ],
+      "title": "CanonicalPage",
+      "type": "object"
+    },
+    "DocumentType": {
+      "enum": [
+        "cv",
+        "recommendation_letter"
+      ],
+      "title": "DocumentType",
+      "type": "string"
+    },
+    "TextBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "title": "Block Id",
+          "type": "string"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "page_start": {
+          "minimum": 0,
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "minimum": 0,
+          "title": "Page End",
+          "type": "integer"
+        },
+        "document_start": {
+          "minimum": 0,
+          "title": "Document Start",
+          "type": "integer"
+        },
+        "document_end": {
+          "minimum": 0,
+          "title": "Document End",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "extraction_method": {
+          "enum": [
+            "native",
+            "ocr"
+          ],
+          "title": "Extraction Method",
+          "type": "string"
+        },
+        "extraction_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extraction Confidence"
+        }
+      },
+      "required": [
+        "block_id",
+        "page",
+        "page_start",
+        "page_end",
+        "document_start",
+        "document_end",
+        "text",
+        "extraction_method"
+      ],
+      "title": "TextBlock",
+      "type": "object"
+    },
+    "ValueStatus": {
+      "enum": [
+        "found",
+        "not_found",
+        "uncertain",
+        "not_applicable",
+        "model_failed"
+      ],
+      "title": "ValueStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "document_type": {
+      "$ref": "#/$defs/DocumentType"
+    },
+    "letter_index": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Letter Index"
+    },
+    "source_sha256": {
+      "title": "Source Sha256",
+      "type": "string"
+    },
+    "source_reference": {
+      "title": "Source Reference",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/CanonicalPage"
+      },
+      "title": "Pages",
+      "type": "array"
+    },
+    "extraction_status": {
+      "$ref": "#/$defs/ValueStatus"
+    },
+    "extraction_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Extraction Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "application_id",
+    "document_id",
+    "document_type",
+    "source_sha256",
+    "source_reference",
+    "text",
+    "pages",
+    "extraction_status"
+  ],
+  "title": "CanonicalDocument",
+  "type": "object"
+}

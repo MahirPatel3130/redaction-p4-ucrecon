@@ -1,0 +1,103 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "pipeline_version": {
+      "title": "Pipeline Version",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "source_sha256": {
+      "title": "Source Sha256",
+      "type": "string"
+    },
+    "config_fingerprint": {
+      "title": "Config Fingerprint",
+      "type": "string"
+    },
+    "stages": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Stages",
+      "type": "object"
+    },
+    "stage_fingerprints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Stage Fingerprints",
+      "type": "object"
+    },
+    "artifact_checksums": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Artifact Checksums",
+      "type": "object"
+    },
+    "retry_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Retry Counts",
+      "type": "object"
+    },
+    "timings_seconds": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Timings Seconds",
+      "type": "object"
+    },
+    "metrics": {
+      "additionalProperties": true,
+      "title": "Metrics",
+      "type": "object"
+    },
+    "failure_stage": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Stage"
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pipeline_version",
+    "document_id",
+    "source_sha256",
+    "config_fingerprint",
+    "updated_at"
+  ],
+  "title": "DocumentCheckpoint",
+  "type": "object"
+}

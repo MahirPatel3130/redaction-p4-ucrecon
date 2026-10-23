@@ -1,0 +1,703 @@
+{
+  "$defs": {
+    "EducationItem": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "degree_type": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "field": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "institution": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "start_year": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "end_year": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "graduation_year": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "item_model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Model Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceSpan"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "degree_type",
+        "field",
+        "institution",
+        "start_year",
+        "end_year",
+        "graduation_year"
+      ],
+      "title": "EducationItem",
+      "type": "object"
+    },
+    "EducationSection": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ValueStatus"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "not_found_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Not Found Reason"
+        },
+        "validation_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Flags",
+          "type": "array"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EducationItem"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "EducationSection",
+      "type": "object"
+    },
+    "EmploymentItem": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "organization": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "original_title": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "job_category": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "position_type": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "start_date": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "end_date": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "item_model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Model Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceSpan"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "organization",
+        "original_title",
+        "job_category",
+        "position_type",
+        "start_date",
+        "end_date"
+      ],
+      "title": "EmploymentItem",
+      "type": "object"
+    },
+    "EmploymentSection": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ValueStatus"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "not_found_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Not Found Reason"
+        },
+        "validation_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Flags",
+          "type": "array"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/EmploymentItem"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "EmploymentSection",
+      "type": "object"
+    },
+    "EntityMention": {
+      "additionalProperties": false,
+      "properties": {
+        "mention_id": {
+          "title": "Mention Id",
+          "type": "string"
+        },
+        "identifier_type": {
+          "enum": [
+            "person_name",
+            "organization",
+            "work_title",
+            "email",
+            "phone_number",
+            "postal_address",
+            "website",
+            "unique_identifier",
+            "signature",
+            "date"
+          ],
+          "title": "Identifier Type",
+          "type": "string"
+        },
+        "person_role": {
+          "default": "unknown",
+          "enum": [
+            "applicant",
+            "recommender",
+            "reference",
+            "coauthor",
+            "recipient",
+            "advisor",
+            "committee_member",
+            "third_party",
+            "institution",
+            "unknown"
+          ],
+          "title": "Person Role",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "detector": {
+          "enum": [
+            "model",
+            "regex",
+            "alias",
+            "privacy_repair"
+          ],
+          "title": "Detector",
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceSpan"
+        },
+        "grounded": {
+          "default": false,
+          "title": "Grounded",
+          "type": "boolean"
+        },
+        "local_entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Entity Id"
+        },
+        "resolved_entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Entity Id"
+        }
+      },
+      "required": [
+        "mention_id",
+        "identifier_type",
+        "text",
+        "detector",
+        "evidence"
+      ],
+      "title": "EntityMention",
+      "type": "object"
+    },
+    "EvidenceSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "start": {
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "minimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "text_sha256": {
+          "title": "Text Sha256",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "extraction_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "native",
+                "ocr"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extraction Method"
+        }
+      },
+      "required": [
+        "page",
+        "start",
+        "end",
+        "text_sha256"
+      ],
+      "title": "EvidenceSpan",
+      "type": "object"
+    },
+    "ExtractedField": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "status": {
+          "$ref": "#/$defs/ValueStatus"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceSpan"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "validation_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "value",
+        "status"
+      ],
+      "title": "ExtractedField",
+      "type": "object"
+    },
+    "PublicationAuthor": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "author_position": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author Position"
+        },
+        "is_applicant": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Applicant"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "PublicationAuthor",
+      "type": "object"
+    },
+    "PublicationItem": {
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "title": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "doi": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "publication_type": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "year": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "venue": {
+          "$ref": "#/$defs/ExtractedField"
+        },
+        "authors": {
+          "items": {
+            "$ref": "#/$defs/PublicationAuthor"
+          },
+          "title": "Authors",
+          "type": "array"
+        },
+        "item_model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Model Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceSpan"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_id",
+        "title",
+        "doi",
+        "publication_type",
+        "year",
+        "venue"
+      ],
+      "title": "PublicationItem",
+      "type": "object"
+    },
+    "PublicationSection": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ValueStatus"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "not_found_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Not Found Reason"
+        },
+        "validation_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Validation Flags",
+          "type": "array"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PublicationItem"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "PublicationSection",
+      "type": "object"
+    },
+    "ValueStatus": {
+      "enum": [
+        "found",
+        "not_found",
+        "uncertain",
+        "not_applicable",
+        "model_failed"
+      ],
+      "title": "ValueStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "education": {
+      "$ref": "#/$defs/EducationSection"
+    },
+    "employment": {
+      "$ref": "#/$defs/EmploymentSection"
+    },
+    "publications": {
+      "$ref": "#/$defs/PublicationSection"
+    },
+    "research_fields": {
+      "items": {
+        "$ref": "#/$defs/ExtractedField"
+      },
+      "title": "Research Fields",
+      "type": "array"
+    },
+    "research_methods": {
+      "items": {
+        "$ref": "#/$defs/ExtractedField"
+      },
+      "title": "Research Methods",
+      "type": "array"
+    },
+    "mentions": {
+      "items": {
+        "$ref": "#/$defs/EntityMention"
+      },
+      "title": "Mentions",
+      "type": "array"
+    },
+    "extraction_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Extraction Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "application_id",
+    "document_id",
+    "education",
+    "employment",
+    "publications"
+  ],
+  "title": "CVExtraction",
+  "type": "object"
+}

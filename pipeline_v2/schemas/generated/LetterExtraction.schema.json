@@ -1,0 +1,316 @@
+{
+  "$defs": {
+    "EntityMention": {
+      "additionalProperties": false,
+      "properties": {
+        "mention_id": {
+          "title": "Mention Id",
+          "type": "string"
+        },
+        "identifier_type": {
+          "enum": [
+            "person_name",
+            "organization",
+            "work_title",
+            "email",
+            "phone_number",
+            "postal_address",
+            "website",
+            "unique_identifier",
+            "signature",
+            "date"
+          ],
+          "title": "Identifier Type",
+          "type": "string"
+        },
+        "person_role": {
+          "default": "unknown",
+          "enum": [
+            "applicant",
+            "recommender",
+            "reference",
+            "coauthor",
+            "recipient",
+            "advisor",
+            "committee_member",
+            "third_party",
+            "institution",
+            "unknown"
+          ],
+          "title": "Person Role",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "detector": {
+          "enum": [
+            "model",
+            "regex",
+            "alias",
+            "privacy_repair"
+          ],
+          "title": "Detector",
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceSpan"
+        },
+        "grounded": {
+          "default": false,
+          "title": "Grounded",
+          "type": "boolean"
+        },
+        "local_entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Local Entity Id"
+        },
+        "resolved_entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved Entity Id"
+        }
+      },
+      "required": [
+        "mention_id",
+        "identifier_type",
+        "text",
+        "detector",
+        "evidence"
+      ],
+      "title": "EntityMention",
+      "type": "object"
+    },
+    "EvidenceSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "start": {
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "minimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "text_sha256": {
+          "title": "Text Sha256",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "extraction_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "native",
+                "ocr"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extraction Method"
+        }
+      },
+      "required": [
+        "page",
+        "start",
+        "end",
+        "text_sha256"
+      ],
+      "title": "EvidenceSpan",
+      "type": "object"
+    },
+    "ProposedRelationship": {
+      "additionalProperties": false,
+      "properties": {
+        "relationship_type": {
+          "enum": [
+            "wrote_recommendation_for",
+            "listed_as_reference_by",
+            "educated_at",
+            "worked_at",
+            "authored",
+            "published_in"
+          ],
+          "title": "Relationship Type",
+          "type": "string"
+        },
+        "source_mention_id": {
+          "title": "Source Mention Id",
+          "type": "string"
+        },
+        "target_mention_id": {
+          "title": "Target Mention Id",
+          "type": "string"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceSpan"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "relationship_type",
+        "source_mention_id",
+        "target_mention_id"
+      ],
+      "title": "ProposedRelationship",
+      "type": "object"
+    },
+    "ValueStatus": {
+      "enum": [
+        "found",
+        "not_found",
+        "uncertain",
+        "not_applicable",
+        "model_failed"
+      ],
+      "title": "ValueStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "mentions": {
+      "items": {
+        "$ref": "#/$defs/EntityMention"
+      },
+      "title": "Mentions",
+      "type": "array"
+    },
+    "relationships": {
+      "items": {
+        "$ref": "#/$defs/ProposedRelationship"
+      },
+      "title": "Relationships",
+      "type": "array"
+    },
+    "extraction_status": {
+      "$ref": "#/$defs/ValueStatus"
+    },
+    "model_confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Confidence"
+    },
+    "extraction_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Extraction Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "application_id",
+    "document_id",
+    "extraction_status"
+  ],
+  "title": "LetterExtraction",
+  "type": "object"
+}

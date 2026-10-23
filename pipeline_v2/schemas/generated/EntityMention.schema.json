@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "EvidenceSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "start": {
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "minimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "text_sha256": {
+          "title": "Text Sha256",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "extraction_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "native",
+                "ocr"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extraction Method"
+        }
+      },
+      "required": [
+        "page",
+        "start",
+        "end",
+        "text_sha256"
+      ],
+      "title": "EvidenceSpan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "mention_id": {
+      "title": "Mention Id",
+      "type": "string"
+    },
+    "identifier_type": {
+      "enum": [
+        "person_name",
+        "organization",
+        "work_title",
+        "email",
+        "phone_number",
+        "postal_address",
+        "website",
+        "unique_identifier",
+        "signature",
+        "date"
+      ],
+      "title": "Identifier Type",
+      "type": "string"
+    },
+    "person_role": {
+      "default": "unknown",
+      "enum": [
+        "applicant",
+        "recommender",
+        "reference",
+        "coauthor",
+        "recipient",
+        "advisor",
+        "committee_member",
+        "third_party",
+        "institution",
+        "unknown"
+      ],
+      "title": "Person Role",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    },
+    "model_confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Confidence"
+    },
+    "detector": {
+      "enum": [
+        "model",
+        "regex",
+        "alias",
+        "privacy_repair"
+      ],
+      "title": "Detector",
+      "type": "string"
+    },
+    "evidence": {
+      "$ref": "#/$defs/EvidenceSpan"
+    },
+    "grounded": {
+      "default": false,
+      "title": "Grounded",
+      "type": "boolean"
+    },
+    "local_entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Local Entity Id"
+    },
+    "resolved_entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resolved Entity Id"
+    }
+  },
+  "required": [
+    "mention_id",
+    "identifier_type",
+    "text",
+    "detector",
+    "evidence"
+  ],
+  "title": "EntityMention",
+  "type": "object"
+}

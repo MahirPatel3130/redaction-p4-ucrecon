@@ -1,0 +1,63 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "relationship_id": {
+      "title": "Relationship Id",
+      "type": "string"
+    },
+    "relationship_type": {
+      "title": "Relationship Type",
+      "type": "string"
+    },
+    "source_id": {
+      "title": "Source Id",
+      "type": "string"
+    },
+    "target_id": {
+      "title": "Target Id",
+      "type": "string"
+    },
+    "application_id": {
+      "title": "Application Id",
+      "type": "string"
+    },
+    "document_id": {
+      "title": "Document Id",
+      "type": "string"
+    },
+    "model_confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Confidence"
+    },
+    "validation_status": {
+      "enum": [
+        "validated",
+        "uncertain",
+        "rejected"
+      ],
+      "title": "Validation Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "relationship_id",
+    "relationship_type",
+    "source_id",
+    "target_id",
+    "application_id",
+    "document_id",
+    "validation_status"
+  ],
+  "title": "ResolvedRelationship",
+  "type": "object"
+}
