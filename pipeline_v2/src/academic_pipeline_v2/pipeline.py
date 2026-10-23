@@ -14,7 +14,7 @@ import yaml
 from . import PIPELINE_VERSION, PROMPT_VERSION, SCHEMA_VERSION
 from .checkpoints import CheckpointStore, stage_fingerprint
 from .config import PipelineConfig
-from .errors import ConfigurationError, ContractError, PipelineError
+from .errors import ConfigurationError, ContractError, InferenceError, PipelineError
 from .exporter import build_candidate, release_candidate, select_review_sample, validate_review
 from .exporter import validate_candidate_package
 from .extraction import extract_canonical
