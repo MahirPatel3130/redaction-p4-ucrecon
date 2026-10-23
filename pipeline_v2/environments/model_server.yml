@@ -9,4 +9,3 @@ dependencies:
       # restricted host before production. This environment is intentionally
       # separate from PDF/OCR dependencies.
       - vllm>=0.12,<1
-

@@ -47,4 +47,3 @@ separate command bound to the exact candidate-manifest checksum reviewed.
 Withheld documents are repaired automatically at the smallest failed stage up to the configured
 limit. Remaining unsafe documents are excluded and represented only by non-sensitive quality
 metadata; they do not create a manual adjudication queue.
-

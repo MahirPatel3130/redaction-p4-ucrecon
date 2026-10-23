@@ -44,4 +44,3 @@ are safe. Do not rewrite the content. Mark safe=true only when no identifier spa
 CANDIDATE_TEXT:
 {text}
 """
-

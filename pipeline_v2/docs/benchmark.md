@@ -9,4 +9,3 @@ JSON validity, retries, tokens, calls/document, median and p95 latency, throughp
 
 Do not select a production model or claim speedup until paired restricted-host measurements exist.
 Synthetic/public accuracy demonstrates implementation behavior, not P4 safety.
-

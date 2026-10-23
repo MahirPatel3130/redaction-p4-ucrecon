@@ -71,4 +71,3 @@ def section_inventory(text: str) -> dict[str, dict[str, int | bool]]:
         )
         result[name] = {"heading_found": True, "candidate_entry_count": int(candidates)}
     return result
-

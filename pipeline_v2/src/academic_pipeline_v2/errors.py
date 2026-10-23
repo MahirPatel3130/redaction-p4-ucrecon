@@ -24,4 +24,3 @@ class PrivacyError(PipelineError):
 
 class ReleaseError(PipelineError):
     pass
-

@@ -10,4 +10,3 @@ Exported schemas can be regenerated in an installed development environment with
 ```bash
 python scripts/export_schemas.py --output schemas/generated
 ```
-
