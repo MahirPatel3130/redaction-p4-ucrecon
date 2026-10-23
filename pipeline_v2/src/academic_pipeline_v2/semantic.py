@@ -403,7 +403,11 @@ def extract_cv(document: CanonicalDocument, backend: InferenceBackend,
                max_tokens: int, maximum_repairs: int,
                context_length: int = 32768) -> tuple[CVExtraction, dict[str, Any]]:
     inventory = section_inventory(document.text)
-    chunks = _chunks(document.text, max(4000, int(context_length * 2.5)))
+    # Dense publication lists expand substantially in the structured response. Keep CV
+    # chunks bounded even when the model has a large input context so generation cannot
+    # consume the entire output budget before closing the JSON object.
+    cv_chunk_chars = max(8000, min(24000, int((context_length - max_tokens - 2048) * 2.5)))
+    chunks = _chunks(document.text, cv_chunk_chars)
     responses = []
     raw_chunks = []
     for offset, chunk in chunks:
@@ -437,7 +441,8 @@ def extract_letter(document: CanonicalDocument, backend: InferenceBackend,
                    max_tokens: int, context_length: int = 32768) -> tuple[LetterExtraction, dict[str, Any]]:
     responses = []
     raw_chunks = []
-    for offset, chunk in _chunks(document.text, max(4000, int(context_length * 2.5))):
+    letter_chunk_chars = max(8000, min(60000, int((context_length - max_tokens - 2048) * 2.5)))
+    for offset, chunk in _chunks(document.text, letter_chunk_chars):
         validated, attempts = _validated_completion(
             backend, "letter", LETTER_PROMPT.format(text=chunk), RawLetter, max_tokens)
         responses.extend(attempts)

@@ -208,6 +208,41 @@ def test_vllm_is_loopback_only_and_retries_malformed_json() -> None:
     assert response.retry_count == 1
 
 
+def test_vllm_recovers_fenced_json() -> None:
+    config = ModelConfig(base_url="http://127.0.0.1:8000/v1", max_retries=0)
+    backend = VLLMBackend(config)
+    backend.client.close()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {
+                "content": "```json\n{\"safe\": true}\n```",
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        })
+
+    backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = backend.complete("test", "prompt", {"type": "object"}, 32)
+    backend.close()
+    assert response.payload == {"safe": True}
+
+
+def test_vllm_reports_truncated_output_without_content_leak() -> None:
+    config = ModelConfig(base_url="http://127.0.0.1:8000/v1", max_retries=0)
+    backend = VLLMBackend(config)
+    backend.client.close()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "length", "message": {"content": "sensitive"}}],
+        })
+
+    backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(Exception, match="model_output_truncated"):
+        backend.complete("test", "prompt", {"type": "object"}, 32)
+    backend.close()
+
+
 def test_same_verified_recommender_email_merges_across_applications(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     make_application(config.input_roots[0], "application_002")

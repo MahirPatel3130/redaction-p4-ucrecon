@@ -34,6 +34,8 @@ class VLLMBackend:
 
         started = time.monotonic()
         retry_count = 0
+        last_error: Exception | None = None
+        last_code = "local_model_request_failed"
         for attempt in range(self.config.max_retries + 1):
             request = {
                 "model": self.config.model,
@@ -54,8 +56,11 @@ class VLLMBackend:
                                             json=request)
                 response.raise_for_status()
                 body = response.json()
-                raw = body["choices"][0]["message"]["content"]
-                payload = json.loads(raw)
+                choice = body["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    raise InferenceError("model_output_truncated")
+                raw = choice["message"]["content"]
+                payload = _parse_json_content(raw)
                 usage = body.get("usage", {})
                 return ModelResponse(
                     payload=payload,
@@ -65,13 +70,47 @@ class VLLMBackend:
                     retry_count=retry_count,
                 )
             except Exception as exc:
+                last_error = exc
+                if isinstance(exc, InferenceError):
+                    last_code = str(exc)
+                elif isinstance(exc, httpx.HTTPStatusError):
+                    last_code = f"model_http_{exc.response.status_code}"
+                elif isinstance(exc, (KeyError, TypeError, IndexError)):
+                    last_code = "malformed_model_api_response"
+                elif isinstance(exc, json.JSONDecodeError):
+                    last_code = "invalid_model_json"
+                else:
+                    last_code = "local_model_request_failed"
                 if attempt >= self.config.max_retries:
-                    raise InferenceError("local_model_request_failed") from exc
+                    raise InferenceError(last_code) from exc
                 retry_count += 1
-        raise InferenceError("local_model_request_failed")
+        raise InferenceError(last_code) from last_error
 
     def close(self) -> None:
         self.client.close()
+
+
+def _parse_json_content(raw: Any) -> dict[str, Any]:
+    """Recover a single JSON object without logging protected model content."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise InferenceError("empty_model_content")
+    value = raw.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, count=1, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value, count=1)
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as original:
+        start = value.find("{")
+        if start < 0:
+            raise InferenceError("invalid_model_json") from original
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(value[start:])
+        except json.JSONDecodeError as exc:
+            raise InferenceError("invalid_model_json") from exc
+    if not isinstance(payload, dict):
+        raise InferenceError("model_json_not_object")
+    return payload
 
 
 def _source(prompt: str) -> str:

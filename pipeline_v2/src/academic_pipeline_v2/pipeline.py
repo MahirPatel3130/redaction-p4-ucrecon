@@ -36,6 +36,15 @@ from .util import (
 LOG = logging.getLogger(__name__)
 
 
+def _safe_failure_code(exc: Exception) -> str:
+    """Return only controlled, non-sensitive failure codes."""
+    if isinstance(exc, (InferenceError, ConfigurationError, ContractError)):
+        value = str(exc)
+        if value and value.replace("_", "").replace("-", "").isalnum():
+            return value
+    return type(exc).__name__
+
+
 def prepare(config: PipelineConfig) -> tuple[Path, Path]:
     protected = config.output_root / "protected"
     metrics = config.output_root / "metrics"
@@ -212,9 +221,10 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
             })
             return record.document_id, result, model_metrics
         except Exception as exc:
-            store.fail(checkpoint, "semantic", type(exc).__name__)
-            LOG.error("Semantic extraction failed document_id=%s error=%s",
-                      record.document_id, type(exc).__name__)
+            code = _safe_failure_code(exc)
+            store.fail(checkpoint, "semantic", code)
+            LOG.error("Semantic extraction failed document_id=%s error=%s code=%s",
+                      record.document_id, type(exc).__name__, code)
             return None
 
     with ThreadPoolExecutor(max_workers=config.model.max_inflight) as executor:
@@ -288,9 +298,10 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                         "redactions": document_redactions, "processing_status": "completed",
                         "extraction_status": "completed", "privacy_metrics": privacy_metrics}
             except Exception as exc:
-                store.fail(checkpoint, "privacy", type(exc).__name__)
-                LOG.error("Privacy validation failed document_id=%s error=%s",
-                          record.document_id, type(exc).__name__)
+                code = _safe_failure_code(exc)
+                store.fail(checkpoint, "privacy", code)
+                LOG.error("Privacy validation failed document_id=%s error=%s code=%s",
+                          record.document_id, type(exc).__name__, code)
                 return None
 
         with ThreadPoolExecutor(max_workers=config.model.max_inflight) as executor:
