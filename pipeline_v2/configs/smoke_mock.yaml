@@ -1,0 +1,23 @@
+input_roots:
+  - ../fixtures/generated/applications
+output_root: ../runs/smoke_mock
+state_root: ../state/smoke_mock
+namespace: v2-synthetic-smoke
+cpu_workers: 2
+ocr:
+  enabled: false
+  device: cpu
+  language: en
+  dpi: 144
+model:
+  backend: mock
+  model: mock
+  max_inflight: 2
+  context_length: 32768
+  store_raw_responses: false
+privacy:
+  policy_path: privacy_policy.yaml
+  maximum_repairs: 2
+  review_fraction: 0.10
+  review_minimum: 2
+  require_human_review: true

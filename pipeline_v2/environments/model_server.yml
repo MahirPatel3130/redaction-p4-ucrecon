@@ -1,0 +1,12 @@
+name: academic-pipeline-v2-vllm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # Pin vLLM/Torch to the Blackwell-compatible versions validated on the
+      # restricted host before production. This environment is intentionally
+      # separate from PDF/OCR dependencies.
+      - vllm>=0.12,<1
+
