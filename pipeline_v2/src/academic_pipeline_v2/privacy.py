@@ -118,10 +118,15 @@ def _scan(text: str, aliases: list[str]) -> list[PrivacyFinding]:
         alias = alias.strip()
         if len(alias) < 3 or alias.isdigit():
             continue
-        start = folded.find(alias.casefold())
-        if start >= 0:
+        needle = alias.casefold()
+        cursor = 0
+        while True:
+            start = folded.find(needle, cursor)
+            if start < 0:
+                break
             findings.append(PrivacyFinding(finding_type="protected_alias", start=start,
                                            end=start + len(alias), detector="alias", grounded=True))
+            cursor = start + max(1, len(alias))
     unique = {(row.finding_type, row.start, row.end): row for row in findings}
     return list(unique.values())
 

@@ -17,7 +17,7 @@ from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
 from academic_pipeline_v2.models import DocumentRecord, DocumentType
 from academic_pipeline_v2.models import CanonicalDocument, CanonicalPage, ModelResponse, ValueStatus
-from academic_pipeline_v2.privacy import RawPrivacyReview, validate_privacy
+from academic_pipeline_v2.privacy import RawPrivacyReview, _scan, validate_privacy
 from academic_pipeline_v2.pipeline import (
     export_candidate_stage, finalize_review_stage, inventory_stage, process_stage, release_stage,
 )
@@ -333,3 +333,11 @@ def test_privacy_review_ignores_placeholder_spans() -> None:
     assert result.release_status == "released"
     assert repaired == text
     assert redactions == []
+
+
+def test_alias_scan_reports_every_repeated_occurrence() -> None:
+    text = "Repeated Alias appears. Repeated Alias appears again. Repeated Alias."
+    findings = [row for row in _scan(text, ["Repeated Alias"])
+                if row.finding_type == "protected_alias"]
+    assert len(findings) == 3
+    assert [text[row.start:row.end] for row in findings] == ["Repeated Alias"] * 3
