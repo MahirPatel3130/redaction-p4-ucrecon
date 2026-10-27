@@ -42,6 +42,10 @@ exact spans. Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], an
 are safe. Do not rewrite the content. Mark safe=true only when no identifier span remains.
 Return at most 50 findings in document order. If more remain, return the first 50 and safe=false;
 the pipeline will repair them and request another bounded review.
+Use only these identifier_type values: person_name, organization, work_title, email,
+phone_number, postal_address, website, unique_identifier, signature, date. Never report any span
+that overlaps an opaque [[...]] placeholder. Do not flag pronouns, common nouns, generic roles,
+ordinary evaluation prose, or non-identifying dates.
 
 CANDIDATE_TEXT:
 {text}

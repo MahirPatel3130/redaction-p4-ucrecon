@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,7 +16,10 @@ from .util import sha256_bytes, stable_id
 
 class RawPrivacyFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    identifier_type: str
+    identifier_type: Literal[
+        "person_name", "organization", "work_title", "email", "phone_number",
+        "postal_address", "website", "unique_identifier", "signature", "date",
+    ]
     start: int
     end: int
 
@@ -24,7 +27,7 @@ class RawPrivacyFinding(BaseModel):
 class RawPrivacyReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
     safe: bool
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float = Field(ge=0, le=1)
     # Bound each pass so constrained decoding closes the JSON object within its budget.
     # Additional findings are handled by the existing iterative repair loop.
     findings: list[RawPrivacyFinding] = Field(default_factory=list, max_length=50)
@@ -123,6 +126,11 @@ def _scan(text: str, aliases: list[str]) -> list[PrivacyFinding]:
     return list(unique.values())
 
 
+def _overlaps_placeholder(text: str, start: int, end: int) -> bool:
+    return any(start < match.end() and end > match.start()
+               for match in re.finditer(r"\[\[[^\]]+\]\]", text))
+
+
 def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                      redactions: list[dict[str, Any]], backend: InferenceBackend,
                      max_tokens: int, maximum_repairs: int) -> tuple[str, PrivacyResult,
@@ -165,7 +173,8 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
             for row in deterministic_findings if row.start is not None and row.end is not None
         ]
         for row in review.findings:
-            if 0 <= row.start < row.end <= len(current):
+            if (0 <= row.start < row.end <= len(current)
+                    and not _overlaps_placeholder(current, row.start, row.end)):
                 model_findings.append(PrivacyFinding(
                     finding_type=row.identifier_type, start=row.start, end=row.end,
                     detector="model", grounded=True,

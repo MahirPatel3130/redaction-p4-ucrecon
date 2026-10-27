@@ -297,3 +297,39 @@ def test_privacy_model_finding_is_automatically_repaired() -> None:
 def test_privacy_review_schema_bounds_findings() -> None:
     schema = RawPrivacyReview.model_json_schema()
     assert schema["properties"]["findings"]["maxItems"] == 50
+    finding_schema = schema["$defs"]["RawPrivacyFinding"]
+    assert "ORG" not in finding_schema["properties"]["identifier_type"]["enum"]
+    assert "organization" in finding_schema["properties"]["identifier_type"]["enum"]
+    assert "model_confidence" in schema["required"]
+
+
+def test_privacy_review_ignores_placeholder_spans() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            start = text.index("ORG")
+            return ModelResponse(payload={
+                "safe": False,
+                "model_confidence": 0.99,
+                "findings": [{"identifier_type": "organization",
+                              "start": start, "end": start + 3}],
+            }, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\n[[ORG:org_example]] provided support."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text="[[ORG:org_example]] provided support.",
+                             document_start=11, document_end=len(text),
+                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, _ = validate_privacy(
+        document, text, [], Backend(), 256, 2)
+    assert result.release_status == "released"
+    assert repaired == text
+    assert redactions == []
