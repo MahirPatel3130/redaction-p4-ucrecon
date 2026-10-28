@@ -392,6 +392,41 @@ def test_privacy_review_withholds_ungrounded_text_and_offsets() -> None:
     assert redactions == []
 
 
+def test_privacy_review_recovers_unique_exact_text() -> None:
+    class Backend:
+        calls = 0
+
+        def complete(self, task, prompt, schema, max_tokens):
+            self.calls += 1
+            if self.calls == 1:
+                payload = {"safe": False, "model_confidence": 0.99,
+                           "findings": [{"identifier_type": "person_name",
+                                         "text": "Unique Person",
+                                         "start": 0, "end": 2}]}
+            else:
+                payload = {"safe": True, "model_confidence": 0.99, "findings": []}
+            return ModelResponse(payload=payload, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nUnique Person provided a recommendation."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text="Unique Person provided a recommendation.",
+                             document_start=11, document_end=len(text),
+                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, _ = validate_privacy(
+        document, text, [], Backend(), 256, 1)
+    assert result.release_status == "released"
+    assert "Unique Person" not in repaired
+    assert len(redactions) == 1
+
+
 def test_alias_scan_reports_every_repeated_occurrence() -> None:
     text = "Repeated Alias appears. Repeated Alias appears again. Repeated Alias."
     findings = [row for row in _scan(text, ["Repeated Alias"])

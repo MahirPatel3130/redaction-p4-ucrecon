@@ -20,7 +20,7 @@ class RawPrivacyFinding(BaseModel):
         "person_name", "organization", "work_title", "email", "phone_number",
         "postal_address", "website", "unique_identifier", "signature", "date",
     ]
-    text: str
+    text: str = Field(min_length=1)
     start: int
     end: int
 
@@ -181,15 +181,25 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
             for row in deterministic_findings if row.start is not None and row.end is not None
         ]
         for row in review.findings:
+            grounded_start: int | None = None
+            grounded_end: int | None = None
             valid_range = 0 <= row.start < row.end <= len(current)
-            if valid_range and _overlaps_placeholder(current, row.start, row.end):
-                continue
             if valid_range and current[row.start:row.end] == row.text:
+                grounded_start, grounded_end = row.start, row.end
+            else:
+                matches = [match.start() for match in re.finditer(re.escape(row.text), current)]
+                if len(matches) == 1:
+                    grounded_start = matches[0]
+                    grounded_end = grounded_start + len(row.text)
+            if (grounded_start is not None and grounded_end is not None
+                    and _overlaps_placeholder(current, grounded_start, grounded_end)):
+                continue
+            if grounded_start is not None and grounded_end is not None:
                 model_findings.append(PrivacyFinding(
-                    finding_type=row.identifier_type, start=row.start, end=row.end,
+                    finding_type=row.identifier_type, start=grounded_start, end=grounded_end,
                     detector="model", grounded=True,
                 ))
-                valid_spans.append((row.start, row.end, row.identifier_type))
+                valid_spans.append((grounded_start, grounded_end, row.identifier_type))
             else:
                 ungrounded_model_findings.append(PrivacyFinding(
                     finding_type="ungrounded_model_finding",
