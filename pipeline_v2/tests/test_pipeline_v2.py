@@ -341,3 +341,39 @@ def test_alias_scan_reports_every_repeated_occurrence() -> None:
                 if row.finding_type == "protected_alias"]
     assert len(findings) == 3
     assert [text[row.start:row.end] for row in findings] == ["Repeated Alias"] * 3
+
+
+def test_privacy_repair_fragment_does_not_become_alias() -> None:
+    class Backend:
+        calls = 0
+
+        def complete(self, task, prompt, schema, max_tokens):
+            self.calls += 1
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            if self.calls == 1:
+                start = text.index("ordinary")
+                payload = {"safe": False, "model_confidence": 0.99,
+                           "findings": [{"identifier_type": "work_title",
+                                         "start": start, "end": start + len("ordinary")}]}
+            else:
+                payload = {"safe": True, "model_confidence": 0.99, "findings": []}
+            return ModelResponse(payload=payload, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nordinary prose and another ordinary phrase."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text="ordinary prose and another ordinary phrase.",
+                             document_start=11, document_end=len(text),
+                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, _ = validate_privacy(
+        document, text, [], Backend(), 256, 2)
+    assert result.release_status == "released"
+    assert repaired.count("ordinary") == 1
+    assert len(redactions) == 1

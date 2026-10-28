@@ -210,7 +210,10 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                 "grounded": True,
             })
         repairs += 1
-    findings = _scan(current, [row["text"] for row in redactions]) + [
+    # Only grounded aliases from the original semantic redactions are authoritative.
+    # Privacy-repair fragments must never become aliases: short model-selected spans
+    # can be ordinary repeated words and would otherwise create cascading false leaks.
+    findings = _scan(current, aliases) + [
         row for row in findings if row.detector == "model" and row.start is not None
         and row.end is not None and row.end <= len(current)
         and "[[" not in current[row.start:row.end]
