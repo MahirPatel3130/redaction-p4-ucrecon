@@ -149,6 +149,7 @@ class MockBackend:
             spans = deterministic_spans(text)
             payload = {"safe": not spans, "model_confidence": 0.99,
                        "findings": [{"identifier_type": row.identifier_type,
+                                     "text": row.text,
                                      "start": row.start, "end": row.end}
                                     for row in spans]}
         else:

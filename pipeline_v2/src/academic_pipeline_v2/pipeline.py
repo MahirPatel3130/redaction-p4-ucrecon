@@ -149,7 +149,7 @@ def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) 
 def _privacy_fingerprint(config: PipelineConfig, semantic_fp: str,
                          resolved: dict[str, Any]) -> str:
     policy = yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8"))
-    return stage_fingerprint("privacy_v2", semantic_fp, config.model.model,
+    return stage_fingerprint("privacy_v2_grounded_text_1", semantic_fp, config.model.model,
                              fingerprint(policy), resolved.get("mention_map", {}))
 
 

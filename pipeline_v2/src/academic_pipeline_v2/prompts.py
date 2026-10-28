@@ -38,7 +38,8 @@ SOURCE_TEXT:
 
 PRIVACY_PROMPT = """TASK=privacy_detection_only
 Inspect the candidate de-identified content. Return remaining direct or linkable identifiers as
-exact spans. Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], and [[WORK:work_...]]
+exact text and exact spans. The text field must equal CANDIDATE_TEXT[start:end] character-for-
+character. Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], and [[WORK:work_...]]
 are safe. Do not rewrite the content. Mark safe=true only when no identifier span remains.
 Return at most 50 findings in document order. If more remain, return the first 50 and safe=false;
 the pipeline will repair them and request another bounded review.

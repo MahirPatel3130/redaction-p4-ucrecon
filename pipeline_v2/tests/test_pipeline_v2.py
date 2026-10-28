@@ -286,6 +286,7 @@ def test_privacy_model_finding_is_automatically_repaired() -> None:
                 start = text.index("Secret Alias")
                 payload = {"safe": False, "model_confidence": 0.99,
                            "findings": [{"identifier_type": "person_name",
+                                         "text": "Secret Alias",
                                          "start": start, "end": start + 12}]}
             else:
                 payload = {"safe": True, "model_confidence": 0.99, "findings": []}
@@ -319,6 +320,7 @@ def test_privacy_review_schema_bounds_findings() -> None:
     finding_schema = schema["$defs"]["RawPrivacyFinding"]
     assert "ORG" not in finding_schema["properties"]["identifier_type"]["enum"]
     assert "organization" in finding_schema["properties"]["identifier_type"]["enum"]
+    assert "text" in finding_schema["required"]
     assert "model_confidence" in schema["required"]
 
 
@@ -331,6 +333,7 @@ def test_privacy_review_ignores_placeholder_spans() -> None:
                 "safe": False,
                 "model_confidence": 0.99,
                 "findings": [{"identifier_type": "organization",
+                              "text": "ORG",
                               "start": start, "end": start + 3}],
             }, latency_seconds=0.01)
 
@@ -349,6 +352,38 @@ def test_privacy_review_ignores_placeholder_spans() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 2)
+    assert result.release_status == "released"
+    assert repaired == text
+    assert redactions == []
+
+
+def test_privacy_review_rejects_ungrounded_text_and_offsets() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            start = text.index("ordinary")
+            return ModelResponse(payload={
+                "safe": False,
+                "model_confidence": 0.99,
+                "findings": [{"identifier_type": "person_name", "text": "Wrong Text",
+                              "start": start, "end": start + len("ordinary")}],
+            }, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nordinary evaluation prose."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text="ordinary evaluation prose.",
+                             document_start=11, document_end=len(text),
+                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, _ = validate_privacy(
+        document, text, [], Backend(), 256, 1)
     assert result.release_status == "released"
     assert repaired == text
     assert redactions == []
@@ -373,6 +408,7 @@ def test_privacy_repair_fragment_does_not_become_alias() -> None:
                 start = text.index("ordinary")
                 payload = {"safe": False, "model_confidence": 0.99,
                            "findings": [{"identifier_type": "work_title",
+                                         "text": "ordinary",
                                          "start": start, "end": start + len("ordinary")}]}
             else:
                 payload = {"safe": True, "model_confidence": 0.99, "findings": []}

@@ -20,6 +20,7 @@ class RawPrivacyFinding(BaseModel):
         "person_name", "organization", "work_title", "email", "phone_number",
         "postal_address", "website", "unique_identifier", "signature", "date",
     ]
+    text: str
     start: int
     end: int
 
@@ -180,6 +181,7 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         ]
         for row in review.findings:
             if (0 <= row.start < row.end <= len(current)
+                    and current[row.start:row.end] == row.text
                     and not _overlaps_placeholder(current, row.start, row.end)):
                 model_findings.append(PrivacyFinding(
                     finding_type=row.identifier_type, start=row.start, end=row.end,
