@@ -146,6 +146,7 @@ OPAQUE_ID_PATTERN = re.compile(
     r"\b[a-z][a-z0-9]*_(?:[0-9a-f]{8}-[0-9a-f-]{8,}|[0-9a-f]{8,})\b",
     flags=re.IGNORECASE,
 )
+PLACEHOLDER_PATTERN = re.compile(r"\[\[[^\]]+\]\]")
 
 
 def _alias_present(text: str, alias: str) -> bool:
@@ -164,10 +165,37 @@ def _alias_present(text: str, alias: str) -> bool:
     return re.search(left + body + right, text, flags=re.IGNORECASE) is not None
 
 
-def _package_leaks(root: Path, protected_aliases: list[str]) -> list[str]:
-    findings: list[str] = []
-    aliases = sorted({alias.casefold() for alias in protected_aliases
-                      if len(alias.strip()) >= 3 and not alias.strip().isdigit()}, key=len, reverse=True)
+def _protected_values(redactions: list[Any]) -> list[str]:
+    """Accept legacy string inputs while preferring complete redaction records."""
+    values: list[str] = []
+    for row in redactions:
+        value = row.get("text", "") if isinstance(row, dict) else row
+        value = str(value).strip()
+        if len(value) >= 3 and not value.isdigit():
+            values.append(value)
+    return sorted(set(values), key=len, reverse=True)
+
+
+def _letter_text(path: Path) -> str:
+    """Return only researcher-visible letter prose, excluding JSON keys and metadata."""
+    rows: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            # Malformed researcher output is independently rejected later; it
+            # must not make the privacy scanner silently skip content.
+            return path.read_text(encoding="utf-8", errors="ignore")
+        rows.append(str(payload.get("text", "")))
+    return "\n".join(rows)
+
+
+def _package_leak_report(root: Path, protected_redactions: list[Any]) -> dict[str, list[str]]:
+    """Scan researcher-visible values without interpreting serialization syntax as data."""
+    aliases = _protected_values(protected_redactions)
+    report: dict[str, list[str]] = {}
     for path in root.rglob("*"):
         if not path.is_file() or path.name == "manifest.json":
             continue
@@ -177,11 +205,27 @@ def _package_leaks(root: Path, protected_aliases: list[str]) -> list[str]:
         # namespace rather than maintaining a brittle allow-list, and support
         # both compact hashes and UUID-shaped suffixes.
         masked = OPAQUE_ID_PATTERN.sub(" ", masked)
+        findings: list[str] = []
         if deterministic_spans(masked):
             findings.append("deterministic_identifier_in_package")
-        if any(_alias_present(masked, alias) for alias in aliases):
-            findings.append("protected_alias_in_package")
-    return sorted(set(findings))
+
+        # Alias comparison is meaningful for source-preserving narrative prose.
+        # Applying it to serialized structured tables confuses permitted semantic
+        # values and schema labels with identifiers that happened to be
+        # over-redacted elsewhere in a document.
+        if path.name == "recommendation_letters.jsonl":
+            narrative = PLACEHOLDER_PATTERN.sub(" ", _letter_text(path))
+            narrative = OPAQUE_ID_PATTERN.sub(" ", narrative)
+            if any(_alias_present(narrative, alias) for alias in aliases):
+                findings.append("protected_alias_in_letter_text")
+        if findings:
+            report[path.relative_to(root).as_posix()] = sorted(set(findings))
+    return report
+
+
+def _package_leaks(root: Path, protected_redactions: list[Any]) -> list[str]:
+    return sorted({finding for findings in _package_leak_report(
+        root, protected_redactions).values() for finding in findings})
 
 
 def build_candidate(output_root: Path, applications: list[dict[str, Any]],
@@ -189,8 +233,8 @@ def build_candidate(output_root: Path, applications: list[dict[str, Any]],
     target = output_root / "researcher_candidate"
     released_ids = {row["document"].document_id for row in processed
                     if row["privacy"].release_status == "validated_candidate"}
-    protected_aliases = [redaction["text"] for row in processed
-                         for redaction in row.get("redactions", [])]
+    protected_redactions = [redaction for row in processed
+                            for redaction in row.get("redactions", [])]
 
     def build(root: Path) -> None:
         documents: list[dict[str, Any]] = []
@@ -301,8 +345,15 @@ def build_candidate(output_root: Path, applications: list[dict[str, Any]],
         }
         atomic_json(root / "quality_summary.json", summary, 0o644)
         atomic_write(root / "README.md", RESEARCHER_README, 0o644)
-        leaks = _package_leaks(root, protected_aliases)
+        report = _package_leak_report(root, protected_redactions)
+        leaks = sorted({finding for findings in report.values() for finding in findings})
         if leaks:
+            atomic_json(output_root / "protected" / "qa_reports" /
+                        "package_export_validation.json", {
+                            "schema_version": SCHEMA_VERSION,
+                            "status": "failed",
+                            "findings_by_file": report,
+                        }, 0o600)
             raise ReleaseError("candidate_package_privacy_validation_failed")
         files = {path.relative_to(root).as_posix(): sha256_file(path)
                  for path in root.rglob("*") if path.is_file()}

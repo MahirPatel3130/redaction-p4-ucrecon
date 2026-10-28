@@ -109,9 +109,9 @@ def test_package_leak_scan_uses_token_boundaries_and_masks_opaque_ids(tmp_path: 
 def test_package_leak_scan_rejects_complete_protected_alias(tmp_path: Path) -> None:
     package = tmp_path / "candidate"
     package.mkdir()
-    (package / "letters.jsonl").write_text(
+    (package / "recommendation_letters.jsonl").write_text(
         '{"text":"Professor Alice Smith recommends the applicant."}\n', encoding="utf-8")
-    assert _package_leaks(package, ["Alice Smith"]) == ["protected_alias_in_package"]
+    assert _package_leaks(package, ["Alice Smith"]) == ["protected_alias_in_letter_text"]
 
 
 class FakeOCR:
