@@ -142,6 +142,28 @@ def _atomic_directory(target: Path, build: Any) -> None:
         raise
 
 
+OPAQUE_ID_PATTERN = re.compile(
+    r"\b[a-z][a-z0-9]*_(?:[0-9a-f]{8}-[0-9a-f-]{8,}|[0-9a-f]{8,})\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _alias_present(text: str, alias: str) -> bool:
+    """Match a protected value as complete tokens, never as a substring.
+
+    The document privacy gate uses the same boundary semantics.  Raw substring
+    matching caused common fragments (for example a short surname contained in
+    a longer word) to reject otherwise clean researcher packages.
+    """
+    tokens = alias.split()
+    if not tokens:
+        return False
+    body = r"\s+".join(re.escape(token) for token in tokens)
+    left = r"(?<!\w)" if tokens[0][0].isalnum() else ""
+    right = r"(?!\w)" if tokens[-1][-1].isalnum() else ""
+    return re.search(left + body + right, text, flags=re.IGNORECASE) is not None
+
+
 def _package_leaks(root: Path, protected_aliases: list[str]) -> list[str]:
     findings: list[str] = []
     aliases = sorted({alias.casefold() for alias in protected_aliases
@@ -151,15 +173,13 @@ def _package_leaks(root: Path, protected_aliases: list[str]) -> list[str]:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         masked = re.sub(r"\[\[[^\]]+\]\]", " ", text)
-        masked = re.sub(
-            r"\b(?:application|document|person|org|work|relationship|education|employment|"
-            r"publication|mention|local|redaction)_[0-9a-f]+\b",
-            " ", masked, flags=re.IGNORECASE,
-        )
+        # Opaque IDs are deliberately non-sensitive join keys.  Mask every
+        # namespace rather than maintaining a brittle allow-list, and support
+        # both compact hashes and UUID-shaped suffixes.
+        masked = OPAQUE_ID_PATTERN.sub(" ", masked)
         if deterministic_spans(masked):
             findings.append("deterministic_identifier_in_package")
-        folded = masked.casefold()
-        if any(alias in folded for alias in aliases):
+        if any(_alias_present(masked, alias) for alias in aliases):
             findings.append("protected_alias_in_package")
     return sorted(set(findings))
 

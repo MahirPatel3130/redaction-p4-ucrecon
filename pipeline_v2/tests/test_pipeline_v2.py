@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from academic_pipeline_v2.audit import build_privacy_audit
 from academic_pipeline_v2.config import ModelConfig, NERConfig, PipelineConfig
-from academic_pipeline_v2.exporter import validate_candidate_package
+from academic_pipeline_v2.exporter import _alias_present, _package_leaks, validate_candidate_package
 from academic_pipeline_v2.evaluation import evaluate_run
 from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
@@ -86,6 +86,32 @@ def test_inventory_and_canonical_offsets(tmp_path: Path) -> None:
     assert canonical.pages[0].blocks
     for block in canonical.pages[0].blocks:
         assert canonical.text[block.document_start:block.document_end] == block.text
+
+
+def test_package_leak_scan_uses_token_boundaries_and_masks_opaque_ids(tmp_path: Path) -> None:
+    package = tmp_path / "candidate"
+    package.mkdir()
+    (package / "entities.csv").write_text(
+        "entity_id,description\n"
+        "person_12345678-1234-1234-1234-123456789abc,Anderson research\n"
+        "organization_abcdef1234567890,Economics\n",
+        encoding="utf-8",
+    )
+    assert _alias_present("Anderson research", "And") is False
+    assert _alias_present("Alice Smith", "Alice Smith") is True
+    assert _package_leaks(package, ["And"]) == []
+
+    (package / "data.jsonl").write_text(
+        '{"text":"Contact alice@example.edu"}\n', encoding="utf-8")
+    assert "deterministic_identifier_in_package" in _package_leaks(package, [])
+
+
+def test_package_leak_scan_rejects_complete_protected_alias(tmp_path: Path) -> None:
+    package = tmp_path / "candidate"
+    package.mkdir()
+    (package / "letters.jsonl").write_text(
+        '{"text":"Professor Alice Smith recommends the applicant."}\n', encoding="utf-8")
+    assert _package_leaks(package, ["Alice Smith"]) == ["protected_alias_in_package"]
 
 
 class FakeOCR:
