@@ -114,6 +114,21 @@ def test_package_leak_scan_rejects_complete_protected_alias(tmp_path: Path) -> N
     assert _package_leaks(package, ["Alice Smith"]) == ["protected_alias_in_letter_text"]
 
 
+def test_package_alias_scan_is_document_local(tmp_path: Path) -> None:
+    package = tmp_path / "candidate"
+    package.mkdir()
+    letters = package / "recommendation_letters.jsonl"
+    letters.write_text(
+        '{"document_id":"document_aaaaaaaa","text":"Economics is relevant."}\n',
+        encoding="utf-8",
+    )
+    other_document = [{"document_id": "document_bbbbbbbb", "text": "Economics"}]
+    assert _package_leaks(package, other_document) == []
+
+    same_document = [{"document_id": "document_aaaaaaaa", "text": "Economics"}]
+    assert _package_leaks(package, same_document) == ["protected_alias_in_letter_text"]
+
+
 class FakeOCR:
     def extract(self, page: object, dpi: int):
         return [("Scanned Applicant Alice", (10.0, 10.0, 200.0, 30.0), 0.99)]

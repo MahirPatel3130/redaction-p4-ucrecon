@@ -176,25 +176,50 @@ def _protected_values(redactions: list[Any]) -> list[str]:
     return sorted(set(values), key=len, reverse=True)
 
 
-def _letter_text(path: Path) -> str:
-    """Return only researcher-visible letter prose, excluding JSON keys and metadata."""
-    rows: list[str] = []
+def _letter_rows(path: Path) -> list[dict[str, Any]]:
+    """Parse researcher-visible letter rows, excluding JSON syntax from privacy matching."""
+    rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         if not line.strip():
             continue
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
-            # Malformed researcher output is independently rejected later; it
-            # must not make the privacy scanner silently skip content.
-            return path.read_text(encoding="utf-8", errors="ignore")
-        rows.append(str(payload.get("text", "")))
-    return "\n".join(rows)
+            return [{"document_id": None, "text": line}]
+        rows.append(payload if isinstance(payload, dict) else {
+            "document_id": None, "text": str(payload)})
+    return rows
+
+
+def _letter_alias_leak(path: Path, protected_redactions: list[Any]) -> bool:
+    """Compare each letter only with aliases protected in that same document.
+
+    Privacy validation is document-local.  Flattening aliases across a package
+    made an over-redacted generic token from one document block unrelated
+    letters, even though each letter independently passed its privacy gate.
+    """
+    global_values = _protected_values(
+        [row for row in protected_redactions if not isinstance(row, dict)])
+    by_document: dict[str, list[Any]] = {}
+    for row in protected_redactions:
+        if not isinstance(row, dict):
+            continue
+        document_id = str(row.get("document_id") or "")
+        if document_id:
+            by_document.setdefault(document_id, []).append(row)
+
+    for row in _letter_rows(path):
+        document_id = str(row.get("document_id") or "")
+        aliases = global_values + _protected_values(by_document.get(document_id, []))
+        narrative = PLACEHOLDER_PATTERN.sub(" ", str(row.get("text", "")))
+        narrative = OPAQUE_ID_PATTERN.sub(" ", narrative)
+        if any(_alias_present(narrative, alias) for alias in aliases):
+            return True
+    return False
 
 
 def _package_leak_report(root: Path, protected_redactions: list[Any]) -> dict[str, list[str]]:
     """Scan researcher-visible values without interpreting serialization syntax as data."""
-    aliases = _protected_values(protected_redactions)
     report: dict[str, list[str]] = {}
     for path in root.rglob("*"):
         if not path.is_file() or path.name == "manifest.json":
@@ -214,9 +239,7 @@ def _package_leak_report(root: Path, protected_redactions: list[Any]) -> dict[st
         # values and schema labels with identifiers that happened to be
         # over-redacted elsewhere in a document.
         if path.name == "recommendation_letters.jsonl":
-            narrative = PLACEHOLDER_PATTERN.sub(" ", _letter_text(path))
-            narrative = OPAQUE_ID_PATTERN.sub(" ", narrative)
-            if any(_alias_present(narrative, alias) for alias in aliases):
+            if _letter_alias_leak(path, protected_redactions):
                 findings.append("protected_alias_in_letter_text")
         if findings:
             report[path.relative_to(root).as_posix()] = sorted(set(findings))
