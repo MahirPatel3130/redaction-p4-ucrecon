@@ -88,6 +88,17 @@ def test_inventory_and_canonical_offsets(tmp_path: Path) -> None:
         assert canonical.text[block.document_start:block.document_end] == block.text
 
 
+def test_semantic_confidence_is_required_and_never_invented() -> None:
+    assert "model_confidence" in RawField.model_json_schema()["required"]
+    with pytest.raises(ValidationError):
+        RawField(value="Economics", status="found", start=0, end=9)
+    with pytest.raises(ValidationError):
+        RawField(value="Economics", status="found", model_confidence=None,
+                 start=0, end=9)
+    failed = RawField(value=None, status="model_failed", model_confidence=None)
+    assert failed.model_confidence is None
+
+
 def test_package_leak_scan_uses_token_boundaries_and_masks_opaque_ids(tmp_path: Path) -> None:
     package = tmp_path / "candidate"
     package.mkdir()

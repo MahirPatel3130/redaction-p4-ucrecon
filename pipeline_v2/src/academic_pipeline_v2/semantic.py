@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import SCHEMA_VERSION
 from .detectors import deterministic_spans, section_inventory
@@ -22,12 +22,28 @@ class RawModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _validate_status_confidence(value: Any) -> Any:
+    if value.status == "model_failed" and value.model_confidence is not None:
+        raise ValueError("model_failed confidence must be null")
+    if value.status != "model_failed" and value.model_confidence is None:
+        raise ValueError("semantic confidence is required")
+    return value
+
+
 class RawField(RawModel):
     value: str | int | float | bool | None
     status: str
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
     start: int | None = None
     end: int | None = None
+
+    @model_validator(mode="after")
+    def confidence_matches_status(self) -> "RawField":
+        if self.status == "model_failed" and self.model_confidence is not None:
+            raise ValueError("model_failed confidence must be null")
+        if self.status != "model_failed" and self.model_confidence is None:
+            raise ValueError("semantic confidence is required")
+        return self
 
 
 class RawEducation(RawModel):
@@ -37,7 +53,7 @@ class RawEducation(RawModel):
     start_year: RawField
     end_year: RawField
     graduation_year: RawField
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float = Field(ge=0, le=1)
     start: int | None = None
     end: int | None = None
 
@@ -49,7 +65,7 @@ class RawEmployment(RawModel):
     position_type: RawField
     start_date: RawField
     end_date: RawField
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float = Field(ge=0, le=1)
     start: int | None = None
     end: int | None = None
 
@@ -67,30 +83,42 @@ class RawPublication(RawModel):
     year: RawField
     venue: RawField
     authors: list[RawAuthor] = Field(default_factory=list)
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float = Field(ge=0, le=1)
     start: int | None = None
     end: int | None = None
 
 
 class RawEducationSection(RawModel):
     status: str
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawEducation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def confidence_matches_status(self) -> "RawEducationSection":
+        return _validate_status_confidence(self)
 
 
 class RawEmploymentSection(RawModel):
     status: str
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawEmployment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def confidence_matches_status(self) -> "RawEmploymentSection":
+        return _validate_status_confidence(self)
 
 
 class RawPublicationSection(RawModel):
     status: str
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawPublication] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def confidence_matches_status(self) -> "RawPublicationSection":
+        return _validate_status_confidence(self)
 
 
 class RawSections(RawModel):
@@ -105,7 +133,13 @@ class RawMention(RawModel):
     text: str
     start: int
     end: int
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def confidence_is_supplied(self) -> "RawMention":
+        if self.model_confidence is None:
+            raise ValueError("mention confidence is required")
+        return self
 
 
 class RawCV(RawModel):
@@ -119,14 +153,18 @@ class RawRelationship(RawModel):
     relationship_type: str
     source_start: int
     target_start: int
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float = Field(ge=0, le=1)
 
 
 class RawLetter(RawModel):
     status: str
-    model_confidence: float | None = Field(default=None, ge=0, le=1)
+    model_confidence: float | None = Field(ge=0, le=1)
     mentions: list[RawMention] = Field(default_factory=list)
     relationships: list[RawRelationship] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def confidence_matches_status(self) -> "RawLetter":
+        return _validate_status_confidence(self)
 
 
 def _chunks(text: str, maximum_chars: int) -> list[tuple[int, str]]:
@@ -281,9 +319,12 @@ def _item_evidence(document: CanonicalDocument, start: int | None,
 def _mentions(document: CanonicalDocument, raw_mentions: list[RawMention]) -> list[EntityMention]:
     candidates: list[tuple[RawMention, str]] = [(row, "model") for row in raw_mentions]
     for row in deterministic_spans(document.text):
-        candidates.append((RawMention(identifier_type=row.identifier_type, person_role="unknown",
-                                      text=row.text, start=row.start, end=row.end,
-                                      model_confidence=None), "regex"))
+        # Deterministic detections intentionally have no model confidence.  Use
+        # model_construct so the strict model-response contract remains strict
+        # without inventing a score for regex evidence.
+        candidates.append((RawMention.model_construct(
+            identifier_type=row.identifier_type, person_role="unknown",
+            text=row.text, start=row.start, end=row.end, model_confidence=None), "regex"))
     accepted: dict[tuple[int, int, str], EntityMention] = {}
     allowed_types = set(EntityMention.model_fields["identifier_type"].annotation.__args__)
     allowed_roles = set(EntityMention.model_fields["person_role"].annotation.__args__)

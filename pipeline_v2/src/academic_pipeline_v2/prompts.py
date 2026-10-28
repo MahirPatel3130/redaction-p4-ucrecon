@@ -4,6 +4,9 @@ For semantic extraction, every found value and identifier mention must include e
 character offsets. For candidate-classification tasks, classify only supplied candidate IDs and do
 not invent spans or offsets.
 Do not rewrite prose. Confidence values are your own assessment in [0,1], not calculated scores.
+Every semantic section, extracted item, extracted field, mention, relationship, and letter result
+must include model_confidence. Use a numeric value from 0.0 through 1.0 for found, not_found, or
+uncertain results. Use null only when status is model_failed. Never omit a confidence property.
 """
 
 CV_PROMPT = """TASK=cv_extraction
