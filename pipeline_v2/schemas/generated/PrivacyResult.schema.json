@@ -48,6 +48,30 @@
           "default": false,
           "title": "Grounded",
           "type": "boolean"
+        },
+        "disposition": {
+          "default": "confirmed",
+          "enum": [
+            "confirmed",
+            "review_required",
+            "advisory"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "model_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Confidence"
         }
       },
       "required": [
@@ -75,7 +99,8 @@
     },
     "release_status": {
       "enum": [
-        "released",
+        "validated_candidate",
+        "review_required",
         "withheld"
       ],
       "title": "Release Status",
@@ -132,6 +157,24 @@
       ],
       "default": null,
       "title": "Content Sha256"
+    },
+    "advisory_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Advisory Count",
+      "type": "integer"
+    },
+    "confirmed_finding_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Confirmed Finding Count",
+      "type": "integer"
+    },
+    "validation_passes": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Validation Passes",
+      "type": "integer"
     }
   },
   "required": [

@@ -285,11 +285,11 @@ def test_privacy_model_finding_is_automatically_repaired() -> None:
         def complete(self, task, prompt, schema, max_tokens):
             text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
             if "Secret Alias" in text:
-                start = text.index("Secret Alias")
                 payload = {"safe": False, "model_confidence": 0.99,
                            "findings": [{"identifier_type": "person_name",
                                          "text": "Secret Alias",
-                                         "start": start, "end": start + 12}]}
+                                         "finding_kind": "visible_identifier",
+                                         "line_number": 2, "model_confidence": 0.99}]}
             else:
                 payload = {"safe": True, "model_confidence": 0.99, "findings": []}
             return ModelResponse(payload=payload, latency_seconds=0.01)
@@ -309,9 +309,9 @@ def test_privacy_model_finding_is_automatically_repaired() -> None:
     )
     repaired, result, redactions, metrics = validate_privacy(
         document, text, [], Backend(), 256, 2)
-    assert result.release_status == "released"
+    assert result.release_status == "validated_candidate"
     assert "Secret Alias" not in repaired
-    assert "[[PRIVACY_REPAIR]]" in repaired
+    assert "[[PERSON:" in repaired
     assert metrics["repairs"] == 1
     assert redactions[0]["detector"] == "privacy_repair"
 
@@ -323,20 +323,21 @@ def test_privacy_review_schema_bounds_findings() -> None:
     assert "ORG" not in finding_schema["properties"]["identifier_type"]["enum"]
     assert "organization" in finding_schema["properties"]["identifier_type"]["enum"]
     assert "text" in finding_schema["required"]
+    assert "start" not in finding_schema["properties"]
+    assert "line_number" in finding_schema["required"]
     assert "model_confidence" in schema["required"]
 
 
 def test_privacy_review_ignores_placeholder_spans() -> None:
     class Backend:
         def complete(self, task, prompt, schema, max_tokens):
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            start = text.index("ORG")
             return ModelResponse(payload={
                 "safe": False,
                 "model_confidence": 0.99,
                 "findings": [{"identifier_type": "organization",
                               "text": "ORG",
-                              "start": start, "end": start + 3}],
+                              "finding_kind": "visible_identifier",
+                              "line_number": 2, "model_confidence": 0.99}],
             }, latency_seconds=0.01)
 
         def close(self):
@@ -354,21 +355,20 @@ def test_privacy_review_ignores_placeholder_spans() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 2)
-    assert result.release_status == "released"
+    assert result.release_status == "validated_candidate"
     assert repaired == text
     assert redactions == []
 
 
-def test_privacy_review_withholds_ungrounded_text_and_offsets() -> None:
+def test_privacy_review_records_unsupported_ungrounded_text_as_advisory() -> None:
     class Backend:
         def complete(self, task, prompt, schema, max_tokens):
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            start = text.index("ordinary")
             return ModelResponse(payload={
                 "safe": False,
                 "model_confidence": 0.99,
                 "findings": [{"identifier_type": "person_name", "text": "Wrong Text",
-                              "start": start, "end": start + len("ordinary")}],
+                              "finding_kind": "visible_identifier",
+                              "line_number": 2, "model_confidence": 0.99}],
             }, latency_seconds=0.01)
 
         def close(self):
@@ -386,10 +386,11 @@ def test_privacy_review_withholds_ungrounded_text_and_offsets() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 1)
-    assert result.release_status == "withheld"
-    assert result.reason_codes == ["ungrounded_model_finding"]
+    assert result.release_status == "validated_candidate"
+    assert result.reason_codes == ["unsupported_model_advisory"]
     assert len(result.findings) == 1
     assert result.findings[0].grounded is False
+    assert result.findings[0].disposition == "advisory"
     assert repaired == text
     assert redactions == []
 
@@ -400,11 +401,13 @@ def test_privacy_review_recovers_unique_exact_text() -> None:
 
         def complete(self, task, prompt, schema, max_tokens):
             self.calls += 1
-            if self.calls == 1:
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            if "Unique Person" in text:
                 payload = {"safe": False, "model_confidence": 0.99,
                            "findings": [{"identifier_type": "person_name",
                                          "text": "Unique Person",
-                                         "start": 0, "end": 2}]}
+                                         "finding_kind": "visible_identifier",
+                                         "line_number": 2, "model_confidence": 0.99}]}
             else:
                 payload = {"safe": True, "model_confidence": 0.99, "findings": []}
             return ModelResponse(payload=payload, latency_seconds=0.01)
@@ -424,7 +427,7 @@ def test_privacy_review_recovers_unique_exact_text() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 1)
-    assert result.release_status == "released"
+    assert result.release_status == "validated_candidate"
     assert "Unique Person" not in repaired
     assert len(redactions) == 1
 
@@ -444,21 +447,17 @@ def test_alias_scan_reports_every_repeated_occurrence() -> None:
     assert [text[row.start:row.end] for row in findings] == ["Repeated Alias"] * 3
 
 
-def test_privacy_repair_fragment_does_not_become_alias() -> None:
+def test_privacy_generic_single_word_is_advisory_not_repaired() -> None:
     class Backend:
         calls = 0
 
         def complete(self, task, prompt, schema, max_tokens):
             self.calls += 1
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            if self.calls == 1:
-                start = text.index("ordinary")
-                payload = {"safe": False, "model_confidence": 0.99,
-                           "findings": [{"identifier_type": "work_title",
-                                         "text": "ordinary",
-                                         "start": start, "end": start + len("ordinary")}]}
-            else:
-                payload = {"safe": True, "model_confidence": 0.99, "findings": []}
+            payload = {"safe": False, "model_confidence": 0.99,
+                       "findings": [{"identifier_type": "work_title",
+                                     "text": "ordinary",
+                                     "finding_kind": "visible_identifier",
+                                     "line_number": 2, "model_confidence": 0.99}]}
             return ModelResponse(payload=payload, latency_seconds=0.01)
 
         def close(self):
@@ -476,6 +475,104 @@ def test_privacy_repair_fragment_does_not_become_alias() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 2)
-    assert result.release_status == "released"
-    assert repaired.count("ordinary") == 1
-    assert len(redactions) == 1
+    assert result.release_status == "validated_candidate"
+    assert repaired.count("ordinary") == 2
+    assert redactions == []
+    assert result.advisory_count == 2
+
+
+def test_privacy_contextual_risk_requires_review_without_deleting_text() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            return ModelResponse(payload={
+                "safe": False, "model_confidence": 0.94,
+                "findings": [{"identifier_type": "person_name", "text": "rare trajectory",
+                              "finding_kind": "contextual_risk", "line_number": 2,
+                              "model_confidence": 0.94}],
+            }, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nA rare trajectory is described without a direct identifier."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
+                             document_end=len(text), extraction_method="native",
+                             extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, metrics = validate_privacy(
+        document, text, [], Backend(), 256, 2)
+    assert result.release_status == "review_required"
+    assert result.reason_codes == ["contextual_reidentification_review"]
+    assert repaired == text
+    assert redactions == []
+    assert metrics["calls"] == 2
+
+
+def test_privacy_repeated_visible_value_is_repaired_in_one_batch() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            findings = ([{"identifier_type": "person_name", "text": "Named Person",
+                          "finding_kind": "visible_identifier", "line_number": 2,
+                          "model_confidence": 0.98}]
+                        if "Named Person" in text else [])
+            return ModelResponse(payload={"safe": not findings, "model_confidence": 0.98,
+                                          "findings": findings}, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nNamed Person thanked Named Person."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
+                             document_end=len(text), extraction_method="native",
+                             extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, metrics = validate_privacy(
+        document, text, [], Backend(), 256, 2)
+    assert result.release_status == "validated_candidate"
+    assert "Named Person" not in repaired
+    assert len(redactions) == 2
+    assert metrics["repairs"] == 1
+    assert metrics["calls"] == 2
+
+
+def test_privacy_confirmed_residual_is_withheld_when_repair_disabled() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            return ModelResponse(payload={
+                "safe": False, "model_confidence": 0.99,
+                "findings": [{"identifier_type": "person_name", "text": "Visible Person",
+                              "finding_kind": "visible_identifier", "line_number": 2,
+                              "model_confidence": 0.99}],
+            }, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nVisible Person remains."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
+                             document_end=len(text), extraction_method="native",
+                             extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, _ = validate_privacy(
+        document, text, [], Backend(), 256, 0)
+    assert result.release_status == "withheld"
+    assert result.reason_codes == ["confirmed_residual_privacy_finding"]
+    assert result.confirmed_finding_count == 1
+    assert repaired == text
+    assert redactions == []

@@ -56,6 +56,8 @@ class ModelConfig(BaseModel):
 
 class PrivacyConfig(BaseModel):
     policy_path: Path
+    # Retained for configuration compatibility. The finite gate performs at most one
+    # deterministic repair batch whenever this value is greater than zero.
     maximum_repairs: int = Field(2, ge=0, le=5)
     review_fraction: float = Field(0.10, gt=0, le=1)
     review_minimum: int = Field(20, ge=1)

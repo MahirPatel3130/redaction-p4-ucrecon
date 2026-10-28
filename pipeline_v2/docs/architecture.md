@@ -7,14 +7,14 @@ PDF inventory
   -> canonical native/OCR text (protected, cached)
   -> constrained text-model extraction (protected, cached)
   -> SQLite entity resolution + deterministic substitution
-  -> deterministic and model privacy review
+  -> finite evidence-grounded privacy gate
   -> researcher candidate
   -> sampled approval
   -> explicit researcher release
 ```
 
 The source PDF is opened only by canonical extraction. Semantic extraction, identity resolution,
-privacy repair, policy changes, and exports reuse canonical text. A PDF is revisited only when its
+privacy validation, policy changes, and exports reuse canonical text. A PDF is revisited only when its
 checksum changes or the extraction/OCR stage fingerprint changes.
 
 ## Model boundary
@@ -44,6 +44,24 @@ findings remain under `protected/` with owner-only permissions. Candidate export
 direct identifiers and every protected alias before a review sample is created. Final export is a
 separate command bound to the exact candidate-manifest checksum reviewed.
 
-Withheld documents are repaired automatically at the smallest failed stage up to the configured
-limit. Remaining unsafe documents are excluded and represented only by non-sensitive quality
-metadata; they do not create a manual adjudication queue.
+The privacy gate has a fixed state machine:
+
+```text
+candidate text
+  -> deterministic direct-identifier and protected-alias scan
+  -> chunked Qwen candidate detection (exact visible text + numbered line)
+  -> code grounding, policy adjudication, deduplication, overlap resolution
+  -> zero or one deterministic replacement batch
+  -> deterministic residual scan
+  -> independent chunked detection-only review
+  -> validated_candidate | review_required | withheld
+```
+
+Qwen never supplies authoritative offsets and never rewrites prose. Unsupported visible-span
+claims are protected advisories and cannot delete text. Credible contextual risks and saturated or
+internally inconsistent model responses require review. Confirmed grounded residuals cause
+withholding. The model is never called recursively until it returns an empty list.
+
+Only `validated_candidate` documents enter the researcher candidate package. They remain subject
+to the configured stratified release review. `review_required` and `withheld` documents expose only
+non-sensitive quality metadata outside the protected boundary.

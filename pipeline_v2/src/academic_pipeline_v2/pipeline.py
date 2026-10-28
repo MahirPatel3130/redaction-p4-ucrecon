@@ -149,7 +149,7 @@ def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) 
 def _privacy_fingerprint(config: PipelineConfig, semantic_fp: str,
                          resolved: dict[str, Any]) -> str:
     policy = yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8"))
-    return stage_fingerprint("privacy_v2_grounded_text_2", semantic_fp, config.model.model,
+    return stage_fingerprint("privacy_v2_finite_gate_1", semantic_fp, config.model.model,
                              fingerprint(policy), resolved.get("mention_map", {}))
 
 
@@ -263,7 +263,8 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
             cached = store.load_artifact(checkpoint, "privacy", None, stage_fp)
             cached_privacy = (PrivacyResult.model_validate(cached["privacy"])
                               if cached is not None else None)
-            if cached is not None and (not retry_failed or cached_privacy.release_status == "released"):
+            if cached is not None and (not retry_failed or
+                                       cached_privacy.release_status != "withheld"):
                 return {"document": record, "canonical": canonical, "extraction": extraction,
                         "resolved": resolved,
                         "privacy": cached_privacy,
@@ -274,17 +275,14 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                             "cached": True}}
             started = time.monotonic()
             try:
-                deidentified = ""
-                document_redactions: list[dict[str, Any]] = []
-                if cached is not None and retry_failed:
-                    deidentified = str(cached.get("deidentified_text", ""))
-                    document_redactions = list(cached.get("redactions", []))
-                if not deidentified:
-                    deidentified, document_redactions = apply_replacements(
-                        canonical, extraction.mentions)
+                # A retry always starts from canonical text plus authoritative semantic
+                # substitutions. Never feed a prior privacy-repair artifact into another run.
+                deidentified, document_redactions = apply_replacements(
+                    canonical, extraction.mentions)
                 deidentified, privacy, document_redactions, privacy_metrics = validate_privacy(
                     canonical, deidentified, document_redactions, backend,
                     config.model.qa_max_tokens, config.privacy.maximum_repairs,
+                    yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8")),
                 )
                 raw_responses = privacy_metrics.pop("_raw_responses", [])
                 if config.model.store_raw_responses:
@@ -292,8 +290,7 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                 f"{record.document_id}.privacy.json",
                                 {"document_id": record.document_id, "responses": raw_responses})
                 artifact = {"privacy": privacy.model_dump(mode="json"),
-                            # This checkpoint is protected. Retaining withheld progress allows a
-                            # resume to continue repair without reprocessing the original prose.
+                            # Protected evidence for auditing; never an input to a later retry.
                             "deidentified_text": deidentified,
                             "redactions": document_redactions}
                 checkpoint.timings_seconds["privacy"] = time.monotonic() - started
@@ -376,8 +373,9 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
             "document_ids": [row["document"].document_id for row in processed],
             "summary": summary,
         })
-        LOG.info("Processing completed documents=%d released=%d withheld=%d",
+        LOG.info("Processing completed documents=%d validated=%d review_required=%d withheld=%d",
                  len(processed), summary["released_document_count"],
+                 summary["review_required_document_count"],
                  summary["withheld_document_count"])
         return summary
     finally:
@@ -387,7 +385,9 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
 
 
 def summarize(processed: list[dict[str, Any]], timings: list[dict[str, Any]]) -> dict[str, Any]:
-    released = sum(row["privacy"].release_status == "released" for row in processed)
+    released = sum(row["privacy"].release_status == "validated_candidate" for row in processed)
+    review_required = sum(row["privacy"].release_status == "review_required" for row in processed)
+    withheld = sum(row["privacy"].release_status == "withheld" for row in processed)
     totals = [sum(float(row.get(key, 0.0)) for key in
                   ("canonical_seconds", "semantic_seconds", "privacy_seconds")) for row in timings]
     ordered = sorted(totals)
@@ -401,7 +401,8 @@ def summarize(processed: list[dict[str, Any]], timings: list[dict[str, Any]]) ->
     return {
         "schema_version": SCHEMA_VERSION, "document_count": len(processed),
         "released_document_count": released,
-        "withheld_document_count": len(processed) - released,
+        "review_required_document_count": review_required,
+        "withheld_document_count": withheld,
         "failed_document_count": sum(row["processing_status"] == "failed" for row in processed),
         "mean_document_seconds": statistics.fmean(totals) if totals else 0.0,
         "median_document_seconds": statistics.median(totals) if totals else 0.0,

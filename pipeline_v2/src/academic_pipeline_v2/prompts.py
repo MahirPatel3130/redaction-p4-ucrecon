@@ -37,16 +37,23 @@ SOURCE_TEXT:
 """
 
 PRIVACY_PROMPT = """TASK=privacy_detection_only
-Inspect the candidate de-identified content. Return remaining direct or linkable identifiers as
-exact text and exact spans. The text field must equal CANDIDATE_TEXT[start:end] character-for-
-character. Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], and [[WORK:work_...]]
-are safe. Do not rewrite the content. Mark safe=true only when no identifier span remains.
-Return at most 50 findings in document order. If more remain, return the first 50 and safe=false;
-the pipeline will repair them and request another bounded review.
+PASS={pass_name}
+CHUNK_ID={chunk_id}
+POLICY_REPLACE_TYPES={replace_types}
+Inspect the numbered lines of candidate de-identified content. This is detection only: never
+rewrite the content and never calculate character offsets. For each visible violation, copy the
+exact visible text and its numbered source line. Use finding_kind=contextual_risk only when a
+credible identifying combination has no single visible span.
+Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], and [[WORK:work_...]] are safe.
+Mark safe=true only when no visible violation or contextual risk remains.
+Return at most 50 unique findings in document order.
 Use only these identifier_type values: person_name, organization, work_title, email,
 phone_number, postal_address, website, unique_identifier, signature, date. Never report any span
-that overlaps an opaque [[...]] placeholder. Do not flag pronouns, common nouns, generic roles,
-ordinary evaluation prose, or non-identifying dates.
+inside an opaque [[...]] placeholder. Do not report inferred names, paraphrases, pronouns, common
+nouns, generic roles, generic academic terms, ordinary evaluation prose, or non-identifying dates.
+Only categories listed in POLICY_REPLACE_TYPES are prohibited visible identifiers. Use
+finding_kind=contextual_risk for a credible linkable combination that the policy does not express
+as one prohibited visible span.
 
 CANDIDATE_TEXT:
 {text}

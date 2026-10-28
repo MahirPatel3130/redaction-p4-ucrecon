@@ -168,7 +168,7 @@ def build_candidate(output_root: Path, applications: list[dict[str, Any]],
                     processed: list[dict[str, Any]], registry: EntityRegistry) -> Path:
     target = output_root / "researcher_candidate"
     released_ids = {row["document"].document_id for row in processed
-                    if row["privacy"].release_status == "released"}
+                    if row["privacy"].release_status == "validated_candidate"}
     protected_aliases = [redaction["text"] for row in processed
                          for redaction in row.get("redactions", [])]
 
@@ -182,7 +182,7 @@ def build_candidate(output_root: Path, applications: list[dict[str, Any]],
         for row in processed:
             document = row["document"]
             privacy = row["privacy"]
-            released = privacy.release_status == "released"
+            released = privacy.release_status == "validated_candidate"
             documents.append({
                 "schema_version": SCHEMA_VERSION, "application_id": document.application_id,
                 "document_id": document.document_id, "document_type": document.document_type.value,
@@ -270,9 +270,15 @@ def build_candidate(output_root: Path, applications: list[dict[str, Any]],
                       "Withheld documents contain no research content."],
         }
         atomic_json(root / "data_dictionary.json", dictionary, 0o644)
-        summary = {"schema_version": SCHEMA_VERSION, "document_count": len(documents),
-                   "released_document_count": len(released_ids),
-                   "withheld_document_count": len(documents) - len(released_ids)}
+        summary = {
+            "schema_version": SCHEMA_VERSION,
+            "document_count": len(documents),
+            "released_document_count": len(released_ids),
+            "review_required_document_count": sum(
+                row["privacy"].release_status == "review_required" for row in processed),
+            "withheld_document_count": sum(
+                row["privacy"].release_status == "withheld" for row in processed),
+        }
         atomic_json(root / "quality_summary.json", summary, 0o644)
         atomic_write(root / "README.md", RESEARCHER_README, 0o644)
         leaks = _package_leaks(root, protected_aliases)
@@ -307,7 +313,8 @@ only in coverage and quality metadata.
 
 def select_review_sample(processed: list[dict[str, Any]], fraction: float,
                          minimum: int) -> list[dict[str, Any]]:
-    eligible = [row for row in processed if row["privacy"].release_status == "released"]
+    eligible = [row for row in processed
+                if row["privacy"].release_status == "validated_candidate"]
     count = min(len(eligible), max(minimum, int(len(eligible) * fraction + 0.999)))
     ranked = sorted(eligible, key=lambda row: (
         -int(any(page.extraction_method == "ocr" for page in row["canonical"].pages)),

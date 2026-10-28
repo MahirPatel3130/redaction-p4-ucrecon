@@ -254,19 +254,24 @@ class PrivacyFinding(StrictModel):
     end: int | None = Field(default=None, ge=0)
     detector: Literal["substitution", "regex", "alias", "model", "package"]
     grounded: bool = False
+    disposition: Literal["confirmed", "review_required", "advisory"] = "confirmed"
+    model_confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 class PrivacyResult(StrictModel):
     schema_version: str = SCHEMA_VERSION
     application_id: str
     document_id: str
-    release_status: Literal["released", "withheld"]
+    release_status: Literal["validated_candidate", "review_required", "withheld"]
     reason_codes: list[str] = Field(default_factory=list)
     findings: list[PrivacyFinding] = Field(default_factory=list)
     replacement_count: int = Field(0, ge=0)
     repair_attempts: int = Field(0, ge=0)
     model_qa_confidence: float | None = Field(default=None, ge=0, le=1)
     content_sha256: str | None = None
+    advisory_count: int = Field(0, ge=0)
+    confirmed_finding_count: int = Field(0, ge=0)
+    validation_passes: int = Field(0, ge=0)
 
 
 class DocumentCheckpoint(StrictModel):

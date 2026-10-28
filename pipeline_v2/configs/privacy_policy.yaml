@@ -15,3 +15,7 @@ job_titles: controlled_category
 research_fields: retain_unless_distinctive
 research_methods: retain_unless_distinctive
 distinctive_attributes: generalize_or_withhold_record
+unsupported_model_findings: advisory
+contextual_reidentification: review_required
+confirmed_residual_findings: withhold
+repair_batches: 1

@@ -150,7 +150,9 @@ class MockBackend:
             payload = {"safe": not spans, "model_confidence": 0.99,
                        "findings": [{"identifier_type": row.identifier_type,
                                      "text": row.text,
-                                     "start": row.start, "end": row.end}
+                                     "finding_kind": "visible_identifier",
+                                     "line_number": text[:row.start].count("\n") + 1,
+                                     "model_confidence": 0.99}
                                     for row in spans]}
         else:
             payload = {}

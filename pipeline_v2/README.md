@@ -6,7 +6,14 @@ import or change the repository's v1 pipeline.
 
 The source PDF is processed once into protected canonical text. Native PyMuPDF extraction is used
 when reliable; PaddleOCR handles deficient pages. All later model extraction, identity resolution,
-de-identification, repair, and export reuse the cached canonical representation.
+de-identification, finite privacy validation, and export reuse the cached canonical representation.
+
+Privacy validation is evidence-grounded and terminating. Qwen performs two detection-only passes
+around at most one deterministic replacement batch. Model offsets are never trusted, unsupported
+model claims cannot delete text, and repeated generative repair is prohibited. The terminal states
+are `validated_candidate`, `review_required`, and `withheld`. Only `validated_candidate` documents
+enter the candidate researcher package; they still require the configured stratified human review
+before final export.
 
 ## Output boundary
 
@@ -117,9 +124,11 @@ After interruption, or to retry only failed/withheld stages:
 academic-pipeline-v2 resume --config /protected/v2/config.yaml
 ```
 
-Released compatible checkpoints are reused. Failed canonical/semantic stages and withheld privacy
-stages are retried. Repair is bounded by `privacy.maximum_repairs`; unresolved documents remain
-withheld without blocking safe documents.
+Validated and review-required compatible checkpoints are reused. Failed canonical/semantic stages
+and withheld privacy stages are retried. `privacy.maximum_repairs` remains configuration-compatible,
+but privacy validation performs exactly one deterministic repair batch when it is greater than zero.
+There is no model-driven repair loop. Unresolved documents remain withheld without blocking safe
+documents.
 
 Example detached production run:
 
