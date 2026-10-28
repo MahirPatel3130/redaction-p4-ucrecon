@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -16,6 +17,9 @@ from .models import (
 )
 from .prompts import CV_PROMPT, LETTER_PROMPT, REPAIR_PROMPT
 from .util import stable_id
+
+
+LOG = logging.getLogger(__name__)
 
 
 class RawModel(BaseModel):
@@ -235,6 +239,12 @@ def _validated_completion(backend: InferenceBackend, task: str, prompt: str,
             return contract.model_validate(response.payload), responses
         except ValidationError as exc:
             if attempt == 2:
+                safe_issues = [{"location": [str(part) for part in row["loc"]],
+                                "type": row["type"]}
+                               for row in exc.errors(include_url=False, include_context=False,
+                                                     include_input=False)]
+                LOG.error("Semantic contract validation exhausted task=%s issues=%s",
+                          task, json.dumps(safe_issues, separators=(",", ":")))
                 raise
             issues = [{"location": [str(part) for part in row["loc"]],
                        "type": row["type"]}
