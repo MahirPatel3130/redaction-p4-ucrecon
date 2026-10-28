@@ -145,15 +145,19 @@ class MockBackend:
             payload = self._cv(text)
         elif task == "letter":
             payload = self._letter(text)
-        elif task == "privacy":
-            spans = deterministic_spans(text)
-            payload = {"safe": not spans, "model_confidence": 0.99,
-                       "findings": [{"identifier_type": row.identifier_type,
-                                     "text": row.text,
-                                     "finding_kind": "visible_identifier",
-                                     "line_number": text[:row.start].count("\n") + 1,
-                                     "model_confidence": 0.99}
-                                    for row in spans]}
+        elif task == "privacy_candidate":
+            marker = "CANDIDATES_JSON:\n"
+            candidates = json.loads(prompt.rsplit(marker, 1)[1]) if marker in prompt else []
+            payload = {"decisions": [
+                {"candidate_id": row["candidate_id"],
+                 "decision": "preserve" if row["proposed_type"] == "location" else "replace",
+                 "identifier_type": ("postal_address" if row["proposed_type"] == "location"
+                                     else row["proposed_type"]),
+                 "model_confidence": 0.99,
+                 "reason_code": ("generic_or_retained" if row["proposed_type"] == "location"
+                                 else "named_identifier")}
+                for row in candidates
+            ]}
         else:
             payload = {}
         return ModelResponse(payload=payload, latency_seconds=time.monotonic() - started)

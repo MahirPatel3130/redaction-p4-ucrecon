@@ -15,6 +15,14 @@ model:
   max_inflight: 2
   context_length: 32768
   store_raw_responses: false
+ner:
+  enabled: true
+  backend: mock
+  model_path: null
+  device: cpu
+  minimum_score: 0.65
+  chunk_characters: 2000
+  candidates_per_call: 40
 privacy:
   policy_path: privacy_policy.yaml
   maximum_repairs: 2

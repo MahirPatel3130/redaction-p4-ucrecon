@@ -370,24 +370,27 @@ def _parse_cv(document: CanonicalDocument, raw: RawCV,
         protected_fields.extend((author.name, "person_name",
                                  "applicant" if author.is_applicant else "coauthor")
                                 for author in item.authors)
-    existing = {(row.evidence.start, row.evidence.end, row.identifier_type) for row in mentions}
+    existing = {(row.evidence.start, row.evidence.end, row.identifier_type): index
+                for index, row in enumerate(mentions)}
     for field, identifier_type, role in protected_fields:
         if field.value is None or not field.evidence:
             continue
         evidence = field.evidence[0]
         key = (evidence.start, evidence.end, identifier_type)
         if key in existing:
+            index = existing[key]
+            mentions[index] = mentions[index].model_copy(update={"detector": "structured"})
             continue
         mentions.append(EntityMention(
             mention_id=stable_id("mention", f"{document.document_id}:{evidence.start}:"
                                  f"{evidence.end}:{identifier_type}"),
             identifier_type=identifier_type, person_role=role, text=str(field.value),
-            model_confidence=field.model_confidence, detector="model", evidence=evidence,
+            model_confidence=field.model_confidence, detector="structured", evidence=evidence,
             grounded=True,
             local_entity_id=stable_id("local", f"{document.document_id}:{role}:"
                                       f"{str(field.value).casefold()}"),
         ))
-        existing.add(key)
+        existing[key] = len(mentions) - 1
     mentions.sort(key=lambda row: (row.evidence.start, row.evidence.end))
     return CVExtraction(
         application_id=document.application_id, document_id=document.document_id,

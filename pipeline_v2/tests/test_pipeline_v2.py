@@ -10,16 +10,16 @@ import pytest
 import httpx
 from pydantic import ValidationError
 
-from academic_pipeline_v2.config import ModelConfig, PipelineConfig
+from academic_pipeline_v2.audit import build_privacy_audit
+from academic_pipeline_v2.config import ModelConfig, NERConfig, PipelineConfig
 from academic_pipeline_v2.exporter import validate_candidate_package
 from academic_pipeline_v2.evaluation import evaluate_run
 from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
 from academic_pipeline_v2.models import DocumentRecord, DocumentType
 from academic_pipeline_v2.models import CanonicalDocument, CanonicalPage, ModelResponse, ValueStatus
-from academic_pipeline_v2.privacy import (
-    RawPrivacyReview, _ground_model_text, _scan, validate_privacy,
-)
+from academic_pipeline_v2.ner import NERSpan
+from academic_pipeline_v2.privacy import RawCandidateReview, _scan, validate_privacy
 from academic_pipeline_v2.pipeline import (
     export_candidate_stage, finalize_review_stage, inventory_stage, process_stage, release_stage,
 )
@@ -66,6 +66,7 @@ def config_for(tmp_path: Path) -> PipelineConfig:
         "state_root": tmp_path / "state", "namespace": "synthetic",
         "cpu_workers": 2, "ocr": {"enabled": False},
         "model": {"backend": "mock", "model": "mock", "max_inflight": 2},
+        "ner": {"enabled": True, "backend": "mock"},
         "privacy": {"policy_path": policy, "maximum_repairs": 2,
                     "review_fraction": 0.10, "review_minimum": 2,
                     "require_human_review": True},
@@ -119,6 +120,14 @@ def test_end_to_end_candidate_review_release_and_no_leak(tmp_path: Path) -> None
     summary = process_stage(config)
     assert summary["document_count"] == 4
     assert summary["released_document_count"] == 4
+    assert summary["structured_mention_count"] > 0
+    assert summary["ner_candidate_count"] == 0  # structured extraction covered this fixture
+    assert summary["contextual_risk"]["blocks_document_release"] is False
+    contextual = json.loads((config.output_root / "protected" / "contextual_risk" /
+                             "applications.json").read_text())
+    assert contextual["scope"] == "application_level_nonblocking_contextual_assessment"
+    assert next(iter(contextual["applications"].values()))["status"] == \
+        "not_evaluated_insufficient_cohort"
     package = export_candidate_stage(config)
     validation = validate_candidate_package(config.output_root)
     assert validation["status"] == "valid"
@@ -280,165 +289,6 @@ def test_same_verified_recommender_email_merges_across_applications(tmp_path: Pa
     assert len({row["application_id"] for row in rows}) == 2
 
 
-def test_privacy_model_finding_is_automatically_repaired() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            if "Secret Alias" in text:
-                payload = {"safe": False, "model_confidence": 0.99,
-                           "findings": [{"identifier_type": "person_name",
-                                         "text": "Secret Alias",
-                                         "finding_kind": "visible_identifier",
-                                         "line_number": 2, "model_confidence": 0.99}]}
-            else:
-                payload = {"safe": True, "model_confidence": 0.99, "findings": []}
-            return ModelResponse(payload=payload, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nSecret Alias wrote this letter."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text="Secret Alias wrote this letter.",
-                             document_start=11, document_end=len(text),
-                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, metrics = validate_privacy(
-        document, text, [], Backend(), 256, 2)
-    assert result.release_status == "validated_candidate"
-    assert "Secret Alias" not in repaired
-    assert "[[PERSON:" in repaired
-    assert metrics["repairs"] == 1
-    assert redactions[0]["detector"] == "privacy_repair"
-
-
-def test_privacy_review_schema_bounds_findings() -> None:
-    schema = RawPrivacyReview.model_json_schema()
-    assert schema["properties"]["findings"]["maxItems"] == 50
-    finding_schema = schema["$defs"]["RawPrivacyFinding"]
-    assert "ORG" not in finding_schema["properties"]["identifier_type"]["enum"]
-    assert "organization" in finding_schema["properties"]["identifier_type"]["enum"]
-    assert "text" in finding_schema["required"]
-    assert "start" not in finding_schema["properties"]
-    assert "line_number" in finding_schema["required"]
-    assert "model_confidence" in schema["required"]
-
-
-def test_privacy_review_ignores_placeholder_spans() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            return ModelResponse(payload={
-                "safe": False,
-                "model_confidence": 0.99,
-                "findings": [{"identifier_type": "organization",
-                              "text": "ORG",
-                              "finding_kind": "visible_identifier",
-                              "line_number": 2, "model_confidence": 0.99}],
-            }, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\n[[ORG:org_example]] provided support."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text="[[ORG:org_example]] provided support.",
-                             document_start=11, document_end=len(text),
-                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, _ = validate_privacy(
-        document, text, [], Backend(), 256, 2)
-    assert result.release_status == "validated_candidate"
-    assert repaired == text
-    assert redactions == []
-
-
-def test_privacy_review_records_unsupported_ungrounded_text_as_advisory() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            return ModelResponse(payload={
-                "safe": False,
-                "model_confidence": 0.99,
-                "findings": [{"identifier_type": "person_name", "text": "Wrong Text",
-                              "finding_kind": "visible_identifier",
-                              "line_number": 2, "model_confidence": 0.99}],
-            }, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nordinary evaluation prose."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text="ordinary evaluation prose.",
-                             document_start=11, document_end=len(text),
-                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, _ = validate_privacy(
-        document, text, [], Backend(), 256, 1)
-    assert result.release_status == "validated_candidate"
-    assert result.reason_codes == ["unsupported_model_advisory"]
-    assert len(result.findings) == 1
-    assert result.findings[0].grounded is False
-    assert result.findings[0].disposition == "advisory"
-    assert repaired == text
-    assert redactions == []
-
-
-def test_privacy_review_recovers_unique_exact_text() -> None:
-    class Backend:
-        calls = 0
-
-        def complete(self, task, prompt, schema, max_tokens):
-            self.calls += 1
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            if "Unique Person" in text:
-                payload = {"safe": False, "model_confidence": 0.99,
-                           "findings": [{"identifier_type": "person_name",
-                                         "text": "Unique Person",
-                                         "finding_kind": "visible_identifier",
-                                         "line_number": 2, "model_confidence": 0.99}]}
-            else:
-                payload = {"safe": True, "model_confidence": 0.99, "findings": []}
-            return ModelResponse(payload=payload, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nUnique Person provided a recommendation."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text="Unique Person provided a recommendation.",
-                             document_start=11, document_end=len(text),
-                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, _ = validate_privacy(
-        document, text, [], Backend(), 256, 1)
-    assert result.release_status == "validated_candidate"
-    assert "Unique Person" not in repaired
-    assert len(redactions) == 1
-
-
-def test_privacy_grounding_maps_all_exact_and_whitespace_occurrences() -> None:
-    text = "Named Person appears. Named\nPerson appears again. named person."
-    assert _ground_model_text(text, "Named Person") == [
-        (0, 12), (22, 34), (50, 62),
-    ]
-
-
 def test_alias_scan_reports_every_repeated_occurrence() -> None:
     text = "Repeated Alias appears. Repeated Alias appears again. Repeated Alias."
     findings = [row for row in _scan(text, ["Repeated Alias"])
@@ -447,170 +297,176 @@ def test_alias_scan_reports_every_repeated_occurrence() -> None:
     assert [text[row.start:row.end] for row in findings] == ["Repeated Alias"] * 3
 
 
-def test_privacy_generic_single_word_is_advisory_not_repaired() -> None:
-    class Backend:
-        calls = 0
+def test_alias_scan_never_matches_inside_an_unrelated_word() -> None:
+    findings = [row for row in _scan("Ann wrote annually.", ["Ann"])
+                if row.finding_type == "protected_alias"]
+    assert len(findings) == 1
 
-        def complete(self, task, prompt, schema, max_tokens):
-            self.calls += 1
-            payload = {"safe": False, "model_confidence": 0.99,
-                       "findings": [{"identifier_type": "work_title",
-                                     "text": "ordinary",
-                                     "finding_kind": "visible_identifier",
-                                     "line_number": 2, "model_confidence": 0.99}]}
-            return ModelResponse(payload=payload, latency_seconds=0.01)
 
-        def close(self):
-            return None
+class PatternNER:
+    name = "test_ner"
 
-    text = "[[PAGE:1]]\nordinary prose and another ordinary phrase."
-    document = CanonicalDocument(
+    def __init__(self, values: dict[str, str]):
+        self.values = values
+
+    def detect(self, text: str):
+        rows = []
+        for value, identifier_type in self.values.items():
+            cursor = 0
+            while True:
+                start = text.find(value, cursor)
+                if start < 0:
+                    break
+                rows.append(NERSpan(start, start + len(value), value, identifier_type,
+                                    identifier_type, 0.98, self.name))
+                cursor = start + len(value)
+        return rows
+
+    def close(self):
+        return None
+
+
+class CandidateBackend:
+    def __init__(self, decisions: dict[str, str] | None = None):
+        self.decisions = decisions or {}
+
+    def complete(self, task, prompt, schema, max_tokens):
+        assert task == "privacy_candidate"
+        candidates = json.loads(prompt.rsplit("CANDIDATES_JSON:\n", 1)[1])
+        rows = []
+        for candidate in candidates:
+            decision = self.decisions.get(candidate["text"], "replace")
+            proposed = candidate["proposed_type"]
+            identifier_type = "postal_address" if proposed == "location" else proposed
+            rows.append({
+                "candidate_id": candidate["candidate_id"], "decision": decision,
+                "identifier_type": identifier_type, "model_confidence": 0.98,
+                "reason_code": {"replace": "named_identifier",
+                                "preserve": "generic_or_retained",
+                                "review": "ambiguous"}[decision],
+            })
+        return ModelResponse(payload={"decisions": rows}, latency_seconds=0.01)
+
+    def close(self):
+        return None
+
+
+def privacy_document(text: str) -> CanonicalDocument:
+    return CanonicalDocument(
         application_id="application_x", document_id="document_x",
         document_type=DocumentType.LETTER, source_sha256="0" * 64,
         source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text="ordinary prose and another ordinary phrase.",
-                             document_start=11, document_end=len(text),
-                             extraction_method="native", extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, _ = validate_privacy(
-        document, text, [], Backend(), 256, 2)
-    assert result.release_status == "validated_candidate"
-    assert repaired.count("ordinary") == 2
-    assert redactions == []
-    assert result.advisory_count == 3
-
-
-def test_privacy_contextual_risk_requires_review_without_deleting_text() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            return ModelResponse(payload={
-                "safe": False, "model_confidence": 0.94,
-                "findings": [{"identifier_type": "person_name", "text": "rare trajectory",
-                              "finding_kind": "contextual_risk", "line_number": 2,
-                              "model_confidence": 0.94}],
-            }, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nA rare trajectory is described without a direct identifier."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
+        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[-1], document_start=11,
                              document_end=len(text), extraction_method="native",
                              extraction_status=ValueStatus.FOUND)],
         extraction_status=ValueStatus.FOUND,
     )
+
+
+def test_candidate_review_schema_is_bounded_and_offset_free() -> None:
+    schema = RawCandidateReview.model_json_schema()
+    assert schema["properties"]["decisions"]["maxItems"] == 100
+    decision = schema["$defs"]["RawCandidateDecision"]
+    assert "candidate_id" in decision["required"]
+    assert "start" not in decision["properties"]
+
+
+def test_ner_candidate_is_classified_and_repaired_once() -> None:
+    text = "[[PAGE:1]]\nSecret Alias wrote to Secret Alias."
     repaired, result, redactions, metrics = validate_privacy(
-        document, text, [], Backend(), 256, 2)
-    assert result.release_status == "review_required"
-    assert result.reason_codes == ["contextual_reidentification_review"]
-    assert repaired == text
-    assert redactions == []
-    assert metrics["calls"] == 3
-
-
-def test_privacy_repeated_visible_value_is_repaired_in_one_batch() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            findings = ([{"identifier_type": "person_name", "text": "Named Person",
-                          "finding_kind": "visible_identifier", "line_number": 2,
-                          "model_confidence": 0.98}]
-                        if "Named Person" in text else [])
-            return ModelResponse(payload={"safe": not findings, "model_confidence": 0.98,
-                                          "findings": findings}, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nNamed Person thanked Named Person."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
-                             document_end=len(text), extraction_method="native",
-                             extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
-    repaired, result, redactions, metrics = validate_privacy(
-        document, text, [], Backend(), 256, 2)
+        privacy_document(text), text, [], CandidateBackend(), 256, 1, None,
+        PatternNER({"Secret Alias": "person_name"}), 40)
     assert result.release_status == "validated_candidate"
-    assert "Named Person" not in repaired
+    assert "Secret Alias" not in repaired
     assert len(redactions) == 2
     assert metrics["repairs"] == 1
-    assert metrics["calls"] == 3
+    assert metrics["calls"] == 1
 
 
-def test_privacy_confirmed_residual_is_withheld_when_repair_disabled() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            return ModelResponse(payload={
-                "safe": False, "model_confidence": 0.99,
-                "findings": [{"identifier_type": "person_name", "text": "Visible Person",
-                              "finding_kind": "visible_identifier", "line_number": 2,
-                              "model_confidence": 0.99}],
-            }, latency_seconds=0.01)
+def test_classified_ner_value_expands_to_unseen_repeated_occurrence() -> None:
+    class FirstOnlyNER(PatternNER):
+        def detect(self, text: str):
+            rows = super().detect(text)
+            return rows[:1]
 
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nVisible Person remains."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
-                             document_end=len(text), extraction_method="native",
-                             extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
+    text = "[[PAGE:1]]\nSecret Alias wrote to Secret Alias."
     repaired, result, redactions, _ = validate_privacy(
-        document, text, [], Backend(), 256, 0)
+        privacy_document(text), text, [], CandidateBackend(), 256, 1, None,
+        FirstOnlyNER({"Secret Alias": "person_name"}), 40)
+    assert result.release_status == "validated_candidate"
+    assert "Secret Alias" not in repaired
+    assert len(redactions) == 2
+
+
+def test_ner_candidate_can_be_preserved_without_redaction() -> None:
+    text = "[[PAGE:1]]\nBayesian Inference is a generic method."
+    repaired, result, redactions, metrics = validate_privacy(
+        privacy_document(text), text, [],
+        CandidateBackend({"Bayesian Inference": "preserve"}), 256, 1, None,
+        PatternNER({"Bayesian Inference": "work_title"}), 40)
+    assert result.release_status == "validated_candidate"
+    assert repaired == text
+    assert redactions == []
+    assert metrics["ner_preserved_count"] == 2
+
+
+def test_ambiguous_ner_candidate_requires_review() -> None:
+    text = "[[PAGE:1]]\nNature may be a venue or an ordinary word."
+    repaired, result, redactions, _ = validate_privacy(
+        privacy_document(text), text, [], CandidateBackend({"Nature": "review"}), 256, 1,
+        None, PatternNER({"Nature": "organization"}), 40)
+    assert result.release_status == "review_required"
+    assert result.reason_codes == ["ambiguous_ner_candidate_review"]
+    assert repaired == text
+    assert redactions == []
+
+
+def test_ner_residual_is_withheld_when_repair_disabled() -> None:
+    text = "[[PAGE:1]]\nVisible Person remains."
+    repaired, result, redactions, _ = validate_privacy(
+        privacy_document(text), text, [], CandidateBackend(), 256, 0, None,
+        PatternNER({"Visible Person": "person_name"}), 40)
     assert result.release_status == "withheld"
-    assert result.reason_codes == ["confirmed_residual_privacy_finding"]
     assert result.confirmed_finding_count == 1
     assert repaired == text
     assert redactions == []
 
 
-def test_privacy_masked_coverage_pass_finds_second_distinct_identifier() -> None:
-    class Backend:
-        def complete(self, task, prompt, schema, max_tokens):
-            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
-            value = None
-            if "Alpha Person" in text:
-                value = "Alpha Person"
-            elif "Beta Person" in text:
-                value = "Beta Person"
-            findings = ([{"identifier_type": "person_name", "text": value,
-                          "finding_kind": "visible_identifier", "line_number": 2,
-                          "model_confidence": 0.98}] if value else [])
-            return ModelResponse(payload={"safe": not findings, "model_confidence": 0.98,
-                                          "findings": findings}, latency_seconds=0.01)
-
-        def close(self):
-            return None
-
-    text = "[[PAGE:1]]\nAlpha Person worked with Beta Person."
-    document = CanonicalDocument(
-        application_id="application_x", document_id="document_x",
-        document_type=DocumentType.LETTER, source_sha256="0" * 64,
-        source_reference="document_x", text=text,
-        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
-                             document_end=len(text), extraction_method="native",
-                             extraction_status=ValueStatus.FOUND)],
-        extraction_status=ValueStatus.FOUND,
-    )
+def test_placeholder_is_not_an_ner_candidate() -> None:
+    text = "[[PAGE:1]]\n[[ORG:org_example]] provided support."
     repaired, result, redactions, metrics = validate_privacy(
-        document, text, [], Backend(), 256, 1)
+        privacy_document(text), text, [], CandidateBackend(), 256, 1, None,
+        PatternNER({"ORG": "organization"}), 40)
     assert result.release_status == "validated_candidate"
-    assert "Alpha Person" not in repaired
-    assert "Beta Person" not in repaired
-    assert len(redactions) == 2
-    assert metrics["repairs"] == 1
-    assert metrics["calls"] == 3
+    assert repaired == text
+    assert redactions == []
+    assert metrics["calls"] == 0
+
+
+def test_missing_ner_backend_prevents_automatic_validation() -> None:
+    text = "[[PAGE:1]]\nGeneric evaluation prose."
+    repaired, result, _, _ = validate_privacy(
+        privacy_document(text), text, [], CandidateBackend(), 256, 1)
+    assert result.release_status == "review_required"
+    assert result.reason_codes == ["ner_validation_unavailable"]
+    assert repaired == text
+
+
+def test_real_ner_requires_explicit_local_model_path() -> None:
+    with pytest.raises(ValidationError):
+        NERConfig(enabled=True, backend="spacy")
+    value = NERConfig(enabled=True, backend="mock")
+    assert value.model_path is None
+
+
+def test_privacy_audit_is_protected_and_stratified(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    inventory_stage(config)
+    process_stage(config)
+    result = build_privacy_audit(config, per_type=2)
+    path = Path(result["audit_path"])
+    assert result["classification"] == "P4-sensitive-protected-only"
+    assert path.stat().st_mode & 0o777 == 0o600
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert all(row["document_type"] in {"cv", "recommendation_letter"} for row in rows)

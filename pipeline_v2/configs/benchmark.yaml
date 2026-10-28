@@ -18,6 +18,14 @@ model:
   context_length: 32768
   max_inflight: 4
   store_raw_responses: false
+ner:
+  enabled: true
+  backend: spacy
+  model_path: /protected/models/spacy/en_core_web_lg
+  device: cpu
+  minimum_score: 0.65
+  chunk_characters: 2000
+  candidates_per_call: 40
 privacy:
   policy_path: privacy_policy.yaml
   maximum_repairs: 2

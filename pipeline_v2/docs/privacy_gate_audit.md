@@ -1,51 +1,48 @@
-# Privacy-gate root-cause audit and replacement design
+# Privacy-gate audit and finite replacement design
 
 ## Observed failure
 
-The original V2 privacy stage performed `detect -> replace -> detect` until the configured repair
-limit. On the protected smoke run, semantic extraction completed but all eight documents were
-withheld. Repeated passes reported changing sets of names, organizations, dates, and ungrounded
-values while adding many replacement spans. Increasing the repair limit reduced semantic retention
-without establishing a stable safety condition.
+The first V2 privacy gate asked Qwen to discover arbitrary remaining identifiers, replaced its
+grounded answers, and then asked the same model again. On the protected smoke run, the returned set
+changed across passes. This created hundreds of replacements without a stable stopping condition:
+the model was simultaneously proposing evidence, classifying policy, and deciding completeness.
 
-## Root causes in the former implementation
+## Current authority order
 
-- `validate_privacy` used an LLM returning no findings as the stopping condition.
-- Model-selected offsets and exact text jointly authorized deletion, even though offsets were
-  unstable and classifications could be false positives.
-- Repaired prose was fed back into the same detector, allowing new findings on every iteration.
-- Unsupported model claims blocked release but could not be repaired safely.
-- Policy decisions and detection were conflated: broad model categories implicitly determined what
-  must be removed.
-- A 50-finding response could be followed by another destructive pass rather than producing an
-  explicit capacity/review state.
+1. Grounded CV structured fields and grounded letter entity extraction.
+2. Deterministic direct-identifier patterns and exact protected aliases.
+3. A separately loaded offline NER model that proposes exact source spans.
+4. Qwen classification of supplied candidate IDs only: `replace`, `preserve`, or `review`.
+5. Deterministic overlap resolution and one right-to-left replacement batch.
+6. A final deterministic and NER coverage pass over the resulting text.
 
-The protected smoke evidence was consistent with placeholder/fragment sensitivity, duplicate or
-changing model classifications, and hallucinated values. It did not justify weakening deterministic
-checks or assuming that a larger model alone would fix the stopping condition.
+Qwen cannot invent a privacy candidate, provide an offset, or rewrite the document during this
+stage. An invalid NER span is rejected by code. A missing Qwen decision requires review. A confirmed
+final residual is withheld. If NER is unavailable, the document is `review_required`; it does not
+silently pass.
 
-## Replacement invariants
+## Contextual risk boundary
 
-1. The model proposes candidate evidence; it is not the release authority.
-2. Model character offsets are forbidden. Code grounds exact visible text to numbered source lines.
-3. Valid placeholders are structurally masked and cannot become findings.
-4. Two bounded discovery passes inspect the same candidate. The second masks already discovered
-   spans while preserving offsets so the model can find remaining visible candidates.
-5. Only grounded, policy-approved spans can be replaced automatically.
-6. All accepted spans are deduplicated and replaced in one right-to-left batch.
-7. Unsupported model claims are retained as protected advisories and never delete text.
-8. Contextual claims require grounded visible evidence; unsupported contextual claims are advisory.
-   Grounded contextual risks, capacity saturation, and inconsistent unsafe-without-evidence responses enter
-   `review_required`.
-9. Confirmed residual direct identifiers or protected aliases enter `withheld`.
-10. A clean final deterministic scan plus independent detection-only review produces
-   `validated_candidate`; sampled human approval is still required for final export.
-11. Candidate and final content hashes, model-call counts, token counts, findings, and repair counts
-    remain available in protected metrics without logging P4 values.
+Contextual re-identification is not represented as a character span. It is assessed separately at
+application/cohort level using retained quasi-identifiers and stored under
+`protected/contextual_risk/`. It never authorizes deletion of prose. Cohorts below the configured
+minimum are explicitly recorded as insufficient for a meaningful uniqueness assessment.
 
-## Performance boundary
+## Audit workflow
 
-The number of privacy calls is exactly three per text chunk: discovery, masked coverage, and
-independent final review. There is at most one repair batch. Long documents are split into non-overlapping numbered
-line chunks; findings are grounded to document-global offsets and deduplicated. This makes runtime
-and destructive transformations bounded independently of model behavior.
+Use this protected-only command to sample remaining findings by document and finding type:
+
+```bash
+academic-pipeline-v2 audit-privacy --config /protected/v2/config.yaml --per-type 5
+```
+
+The resulting CSV includes exact text and context and is P4-sensitive. Reviewers may label entries
+as true identifiers, false positives, or ambiguous without changing the researcher export. Those
+labels should inform model/threshold benchmarking rather than one-off policy weakening.
+
+## Bounded performance
+
+There are at most two NER coverage scans and two bounded candidate-classification phases per
+document. Classification requests are split by `ner.candidates_per_call`; each candidate is tied to
+an exact validated span. There is at most one replacement batch. Runtime and destructive changes
+therefore remain finite regardless of model behavior.

@@ -1,4 +1,4 @@
-version: "2.0"
+version: "2.1"
 replace_identifier_types:
   - person_name
   - organization
@@ -16,6 +16,6 @@ research_fields: retain_unless_distinctive
 research_methods: retain_unless_distinctive
 distinctive_attributes: generalize_or_withhold_record
 unsupported_model_findings: advisory
-contextual_reidentification: review_required
+contextual_reidentification: separate_application_level_nonblocking_assessment
 confirmed_residual_findings: withhold
 repair_batches: 1

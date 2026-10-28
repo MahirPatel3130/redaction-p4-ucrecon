@@ -7,7 +7,8 @@ PDF inventory
   -> canonical native/OCR text (protected, cached)
   -> constrained text-model extraction (protected, cached)
   -> SQLite entity resolution + deterministic substitution
-  -> finite evidence-grounded privacy gate
+  -> structured + offline-NER privacy gate
+  -> separate application-level contextual-risk assessment
   -> researcher candidate
   -> sampled approval
   -> explicit researcher release
@@ -48,20 +49,25 @@ The privacy gate has a fixed state machine:
 
 ```text
 candidate text
-  -> deterministic direct-identifier and protected-alias scan
-  -> chunked Qwen candidate detection (exact visible text + numbered line)
-  -> coverage detection on the same candidate with known spans masked
-  -> code grounding, policy adjudication, deduplication, overlap resolution
+  -> grounded semantic fields + deterministic identifiers + protected aliases
+  -> local offline NER candidate generation with exact offsets
+  -> bounded Qwen classification of candidate IDs only
+  -> code validation, policy adjudication, deduplication, overlap resolution
   -> zero or one deterministic replacement batch
   -> deterministic residual scan
-  -> independent chunked detection-only review
+  -> independent local NER coverage and bounded classification
   -> validated_candidate | review_required | withheld
 ```
 
-Qwen never supplies authoritative offsets and never rewrites prose. Unsupported visible-span
-claims are protected advisories and cannot delete text. Credible contextual risks and saturated or
-internally inconsistent model responses require review. Confirmed grounded residuals cause
-withholding. The model is never called recursively until it returns an empty list.
+Qwen never discovers spans, supplies offsets, or rewrites prose during privacy validation. It can
+only classify source-grounded NER candidate IDs. Missing decisions become review items; confirmed
+residuals cause withholding. The model is never called recursively until it returns an empty list.
+Without an enabled local NER backend the result is `review_required`, not an automatic pass.
+
+Contextual re-identification is a different question from visible-span removal. V2 records a
+nonblocking, application-level cohort assessment under `protected/contextual_risk/`. Small cohorts
+are explicitly marked `not_evaluated_insufficient_cohort`; contextual concerns never cause the span
+gate to delete additional prose.
 
 Only `validated_candidate` documents enter the researcher candidate package. They remain subject
 to the configured stratified release review. `review_required` and `withheld` documents expose only

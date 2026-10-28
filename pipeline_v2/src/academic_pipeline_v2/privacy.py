@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -11,7 +12,8 @@ from .inference import InferenceBackend
 from .models import (
     CVExtraction, CanonicalDocument, EntityMention, PrivacyFinding, PrivacyResult,
 )
-from .prompts import PRIVACY_PROMPT
+from .ner import NERBackend, NERSpan, NullNERBackend
+from .prompts import NER_CLASSIFICATION_PROMPT
 from .util import sha256_bytes, stable_id
 
 
@@ -21,22 +23,18 @@ IdentifierType = Literal[
 ]
 
 
-class RawPrivacyFinding(BaseModel):
-    """Detection-only model output. Character offsets are deliberately forbidden."""
-
+class RawCandidateDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    finding_kind: Literal["visible_identifier", "contextual_risk"]
+    candidate_id: str
+    decision: Literal["replace", "preserve", "review"]
     identifier_type: IdentifierType
-    text: str = Field(min_length=1, max_length=500)
-    line_number: int = Field(ge=1)
     model_confidence: float = Field(ge=0, le=1)
+    reason_code: Literal["named_identifier", "generic_or_retained", "ambiguous"]
 
 
-class RawPrivacyReview(BaseModel):
+class RawCandidateReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    safe: bool
-    model_confidence: float = Field(ge=0, le=1)
-    findings: list[RawPrivacyFinding] = Field(default_factory=list, max_length=50)
+    decisions: list[RawCandidateDecision] = Field(default_factory=list, max_length=100)
 
 
 PRIORITY = {
@@ -47,17 +45,6 @@ PRIORITY = {
 }
 
 PLACEHOLDER_PATTERN = re.compile(r"\[\[[^\]]+\]\]")
-
-
-@dataclass(frozen=True)
-class TextChunk:
-    chunk_id: str
-    text: str
-    start: int
-    lines: tuple[tuple[int, int, int, str], ...]
-
-    def numbered_text(self) -> str:
-        return "\n".join(f"[{number:04d}] {value.rstrip()}" for number, _, _, value in self.lines)
 
 
 @dataclass(frozen=True)
@@ -163,178 +150,20 @@ def _scan(text: str, aliases: list[str]) -> list[PrivacyFinding]:
     findings = [PrivacyFinding(finding_type=row.identifier_type, start=row.start, end=row.end,
                                detector="regex", grounded=True, disposition="confirmed")
                 for row in deterministic_spans(masked)]
-    folded = masked.casefold()
     for alias in sorted(set(aliases), key=len, reverse=True):
         alias = alias.strip()
         if len(alias) < 3 or alias.isdigit():
             continue
-        needle = alias.casefold()
-        cursor = 0
-        while True:
-            start = folded.find(needle, cursor)
-            if start < 0:
-                break
+        for start, end in _alias_occurrences(masked, alias):
             findings.append(PrivacyFinding(finding_type="protected_alias", start=start,
-                                           end=start + len(alias), detector="alias", grounded=True,
+                                           end=end, detector="alias", grounded=True,
                                            disposition="confirmed"))
-            cursor = start + max(1, len(alias))
     unique = {(row.finding_type, row.start, row.end): row for row in findings}
     return list(unique.values())
 
 
 def _overlaps_placeholder(text: str, start: int, end: int) -> bool:
     return any(start < match.end() and end > match.start() for match in PLACEHOLDER_PATTERN.finditer(text))
-
-
-def _model_text_is_plausible(identifier_type: str, value: str) -> bool:
-    value = value.strip()
-    if len(value) < 3 or PLACEHOLDER_PATTERN.search(value):
-        return False
-    folded = value.casefold()
-    if identifier_type == "organization" and folded in {
-        "university", "college", "school", "department", "institute", "institution",
-        "organization", "committee",
-    }:
-        return False
-    if identifier_type == "person_name" and folded in {
-        "applicant", "candidate", "recommender", "professor", "doctor", "chair",
-        "he", "she", "they", "him", "her", "them",
-    }:
-        return False
-    if identifier_type == "work_title" and len(value.split()) < 2:
-        return False
-    return True
-
-
-def _ground_model_text(text: str, value: str, start: int = 0,
-                       end: int | None = None) -> list[tuple[int, int]]:
-    """Map model-returned text to all deterministic occurrences in a bounded region."""
-    value = value.strip()
-    if not value:
-        return []
-    region_end = len(text) if end is None else end
-    region = text[start:region_end]
-    patterns = [re.escape(value)]
-    tokens = value.split()
-    if len(tokens) > 1:
-        patterns.append(r"\s+".join(re.escape(token) for token in tokens))
-    matches = [(start + match.start(), start + match.end()) for pattern in patterns
-               for match in re.finditer(pattern, region, flags=re.IGNORECASE)]
-    return sorted(set(matches))
-
-
-def _chunks(text: str, maximum_characters: int = 3000) -> list[TextChunk]:
-    raw_lines = text.splitlines(keepends=True) or [text]
-    chunks: list[TextChunk] = []
-    current: list[tuple[int, int, int, str]] = []
-    current_length = 0
-    cursor = 0
-    line_number = 1
-    for value in raw_lines:
-        line_start, line_end = cursor, cursor + len(value)
-        if current and current_length + len(value) > maximum_characters:
-            chunk_start = current[0][1]
-            chunk_end = current[-1][2]
-            chunks.append(TextChunk(f"chunk_{len(chunks) + 1:04d}", text[chunk_start:chunk_end],
-                                    chunk_start, tuple(current)))
-            current = []
-            current_length = 0
-        current.append((line_number, line_start, line_end, value))
-        current_length += len(value)
-        cursor = line_end
-        line_number += 1
-    if current:
-        chunk_start = current[0][1]
-        chunk_end = current[-1][2]
-        chunks.append(TextChunk(f"chunk_{len(chunks) + 1:04d}", text[chunk_start:chunk_end],
-                                chunk_start, tuple(current)))
-    return chunks
-
-
-def _detect(text: str, backend: InferenceBackend, max_tokens: int,
-            pass_name: str, policy: dict[str, Any] | None = None) -> tuple[
-                list[RepairSpan], list[PrivacyFinding], dict[str, Any]]:
-    grounded: list[RepairSpan] = []
-    findings: list[PrivacyFinding] = []
-    metrics: dict[str, Any] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
-                               "inference_seconds": 0.0, "raw_responses": [],
-                               "model_confidences": []}
-    for chunk in _chunks(text):
-        replace_types = ", ".join(sorted(_approved_types(policy)))
-        prompt = PRIVACY_PROMPT.format(pass_name=pass_name, chunk_id=chunk.chunk_id,
-                                       replace_types=replace_types,
-                                       text=chunk.numbered_text())
-        response = backend.complete("privacy", prompt, RawPrivacyReview.model_json_schema(), max_tokens)
-        review = RawPrivacyReview.model_validate(response.payload)
-        metrics["calls"] += 1
-        metrics["input_tokens"] += response.input_tokens or 0
-        metrics["output_tokens"] += response.output_tokens or 0
-        metrics["inference_seconds"] += response.latency_seconds
-        metrics["raw_responses"].append({"pass": pass_name, "chunk_id": chunk.chunk_id,
-                                         "payload": response.payload})
-        metrics["model_confidences"].append(review.model_confidence)
-        if (not review.safe and not review.findings) or len(review.findings) == 50:
-            findings.append(PrivacyFinding(
-                finding_type="model_detection_incomplete", detector="model", grounded=False,
-                disposition="review_required", model_confidence=review.model_confidence,
-            ))
-        line_map = {number: (start, end) for number, start, end, _ in chunk.lines}
-        for row in review.findings:
-            if row.finding_kind == "contextual_risk":
-                bounds = line_map.get(row.line_number)
-                ranges = (_ground_model_text(text, row.text, *bounds) if bounds else [])
-                if not ranges:
-                    ranges = _ground_model_text(text, row.text, chunk.start,
-                                                chunk.start + len(chunk.text))
-                ranges = [(start, end) for start, end in ranges
-                          if not _overlaps_placeholder(text, start, end)]
-                if ranges:
-                    for start, end in ranges:
-                        findings.append(PrivacyFinding(
-                            finding_type="contextual_reidentification_risk", start=start, end=end,
-                            detector="model", grounded=True, disposition="review_required",
-                            model_confidence=row.model_confidence,
-                        ))
-                else:
-                    findings.append(PrivacyFinding(
-                        finding_type="unsupported_contextual_advisory", detector="model",
-                        grounded=False, disposition="advisory",
-                        model_confidence=row.model_confidence,
-                    ))
-                continue
-            if not _model_text_is_plausible(row.identifier_type, row.text):
-                findings.append(PrivacyFinding(
-                    finding_type="unsupported_model_advisory", detector="model",
-                    grounded=False, disposition="advisory",
-                    model_confidence=row.model_confidence,
-                ))
-                continue
-            bounds = line_map.get(row.line_number)
-            ranges = (_ground_model_text(text, row.text, *bounds) if bounds else [])
-            if not ranges and _model_text_is_plausible(row.identifier_type, row.text):
-                ranges = _ground_model_text(text, row.text, chunk.start,
-                                            chunk.start + len(chunk.text))
-            ranges = [(start, end) for start, end in ranges
-                      if not _overlaps_placeholder(text, start, end)]
-            if not ranges:
-                findings.append(PrivacyFinding(
-                    finding_type="unsupported_model_advisory", detector="model",
-                    grounded=False, disposition="advisory",
-                    model_confidence=row.model_confidence,
-                ))
-                continue
-            for start, end in ranges:
-                grounded.append(RepairSpan(start, end, row.identifier_type, "model",
-                                           row.model_confidence))
-                findings.append(PrivacyFinding(
-                    finding_type=row.identifier_type, start=start, end=end, detector="model",
-                    grounded=True, disposition="confirmed",
-                    model_confidence=row.model_confidence,
-                ))
-    unique_spans = {(row.start, row.end, row.identifier_type): row for row in grounded}
-    unique_findings = {(row.finding_type, row.start, row.end, row.detector,
-                        row.disposition): row for row in findings}
-    return list(unique_spans.values()), list(unique_findings.values()), metrics
 
 
 def _approved_types(policy: dict[str, Any] | None) -> set[str]:
@@ -344,28 +173,49 @@ def _approved_types(policy: dict[str, Any] | None) -> set[str]:
             "postal_address", "website", "unique_identifier", "signature"}
 
 
+def _alias_occurrences(text: str, alias: str) -> list[tuple[int, int]]:
+    """Return complete-token alias matches, never arbitrary substrings."""
+    tokens = alias.split()
+    if not tokens:
+        return []
+    body = r"\s+".join(re.escape(token) for token in tokens)
+    left = r"(?<!\w)" if tokens[0][0].isalnum() else ""
+    right = r"(?!\w)" if tokens[-1][-1].isalnum() else ""
+    return [(match.start(), match.end())
+            for match in re.finditer(left + body + right, text, flags=re.IGNORECASE)]
+
+
 def _alias_repairs(text: str, redactions: list[dict[str, Any]]) -> list[RepairSpan]:
     result: list[RepairSpan] = []
     masked = _masked(text)
-    folded = masked.casefold()
     for row in redactions:
         if row.get("detector") == "privacy_repair":
             continue
         alias = str(row.get("text", "")).strip()
         if len(alias) < 3 or alias.isdigit():
             continue
-        cursor = 0
-        while True:
-            start = folded.find(alias.casefold(), cursor)
-            if start < 0:
-                break
+        for start, end in _alias_occurrences(masked, alias):
             result.append(RepairSpan(
-                start, start + len(alias), str(row.get("identifier_type") or "protected_alias"),
+                start, end, str(row.get("identifier_type") or "protected_alias"),
                 "alias", row.get("model_confidence"), str(row.get("person_role") or "unknown"),
                 row.get("resolved_entity_id"), row.get("placeholder"),
             ))
-            cursor = start + len(alias)
     return result
+
+
+def _expand_classified_repairs(text: str, spans: list[RepairSpan]) -> list[RepairSpan]:
+    """Apply a classified named value to every complete-token occurrence in the document."""
+    result = list(spans)
+    for row in spans:
+        value = text[row.start:row.end].strip()
+        if len(value) < 3 or value.isdigit():
+            continue
+        for start, end in _alias_occurrences(_masked(text), value):
+            result.append(RepairSpan(start, end, row.identifier_type, row.detector,
+                                     row.model_confidence, row.person_role,
+                                     row.resolved_entity_id, row.replacement))
+    unique = {(row.start, row.end, row.identifier_type): row for row in result}
+    return list(unique.values())
 
 
 def _deterministic_repairs(text: str) -> list[RepairSpan]:
@@ -409,30 +259,117 @@ def _apply_repair_batch(document: CanonicalDocument, text: str, spans: list[Repa
             "person_role": row.person_role, "resolved_entity_id": row.resolved_entity_id,
             "text": raw, "placeholder": replacement, "page": None,
             "start": row.start, "end": row.end, "model_confidence": row.model_confidence,
-            "detector": "privacy_repair", "grounded": True,
+            "detector": "privacy_repair", "candidate_source": row.detector, "grounded": True,
         })
     return text, len(selected)
+
+
+def _valid_ner_spans(text: str, rows: list[NERSpan]) -> list[NERSpan]:
+    unique: dict[tuple[int, int, str], NERSpan] = {}
+    for row in rows:
+        if not (0 <= row.start < row.end <= len(text)):
+            continue
+        if text[row.start:row.end] != row.text or _overlaps_placeholder(text, row.start, row.end):
+            continue
+        unique[(row.start, row.end, row.identifier_type)] = row
+    return sorted(unique.values(), key=lambda row: (row.start, row.end, row.identifier_type))
+
+
+def _classify_ner_candidates(document: CanonicalDocument, text: str, rows: list[NERSpan],
+                             backend: InferenceBackend, max_tokens: int, batch_size: int,
+                             approved: set[str], pass_name: str) -> tuple[
+                                 list[RepairSpan], list[PrivacyFinding], dict[str, Any]]:
+    accepted: list[RepairSpan] = []
+    findings: list[PrivacyFinding] = []
+    metrics: dict[str, Any] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
+                               "inference_seconds": 0.0, "raw_responses": [],
+                               "model_confidences": [], "preserved": 0}
+    candidates: list[dict[str, Any]] = []
+    row_by_id: dict[str, NERSpan] = {}
+    for row in _valid_ner_spans(text, rows):
+        candidate_id = stable_id(
+            "candidate", f"{document.document_id}:{row.start}:{row.end}:{row.identifier_type}")
+        row_by_id[candidate_id] = row
+        candidates.append({
+            "candidate_id": candidate_id,
+            "proposed_type": row.identifier_type,
+            "text": row.text,
+            "context": text[max(0, row.start - 80):min(len(text), row.end + 80)],
+            "ner_backend": row.backend,
+            "ner_score": row.score,
+        })
+    for batch_start in range(0, len(candidates), batch_size):
+        batch = candidates[batch_start:batch_start + batch_size]
+        prompt = NER_CLASSIFICATION_PROMPT.format(
+            replace_types=", ".join(sorted(approved)),
+            candidates=json.dumps(batch, ensure_ascii=False),
+        )
+        response = backend.complete(
+            "privacy_candidate", prompt, RawCandidateReview.model_json_schema(), max_tokens)
+        review = RawCandidateReview.model_validate(response.payload)
+        metrics["calls"] += 1
+        metrics["input_tokens"] += response.input_tokens or 0
+        metrics["output_tokens"] += response.output_tokens or 0
+        metrics["inference_seconds"] += response.latency_seconds
+        metrics["raw_responses"].append({"pass": pass_name, "payload": response.payload})
+        decisions = {row.candidate_id: row for row in review.decisions
+                     if row.candidate_id in row_by_id}
+        for candidate in batch:
+            candidate_id = candidate["candidate_id"]
+            source = row_by_id[candidate_id]
+            decision = decisions.get(candidate_id)
+            if decision is None:
+                findings.append(PrivacyFinding(
+                    finding_type="ner_candidate_unclassified", start=source.start, end=source.end,
+                    detector="model", grounded=True, disposition="review_required",
+                ))
+                continue
+            metrics["model_confidences"].append(decision.model_confidence)
+            if decision.decision == "replace" and decision.identifier_type in approved:
+                accepted.append(RepairSpan(
+                    source.start, source.end, decision.identifier_type, "ner_model",
+                    decision.model_confidence,
+                ))
+                findings.append(PrivacyFinding(
+                    finding_type=decision.identifier_type, start=source.start, end=source.end,
+                    detector="model", grounded=True, disposition="confirmed",
+                    model_confidence=decision.model_confidence,
+                ))
+            elif decision.decision == "review":
+                findings.append(PrivacyFinding(
+                    finding_type="ambiguous_ner_candidate", start=source.start, end=source.end,
+                    detector="model", grounded=True, disposition="review_required",
+                    model_confidence=decision.model_confidence,
+                ))
+            else:
+                metrics["preserved"] += 1
+    unique_accepted = {(row.start, row.end, row.identifier_type): row for row in accepted}
+    unique_findings = {(row.finding_type, row.start, row.end, row.disposition): row
+                       for row in findings}
+    return list(unique_accepted.values()), list(unique_findings.values()), metrics
 
 
 def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                      redactions: list[dict[str, Any]], backend: InferenceBackend,
                      max_tokens: int, maximum_repairs: int,
-                     policy: dict[str, Any] | None = None) -> tuple[
+                     policy: dict[str, Any] | None = None,
+                     ner_backend: NERBackend | None = None,
+                     ner_candidates_per_call: int = 40) -> tuple[
                          str, PrivacyResult, list[dict[str, Any]], dict[str, Any]]:
-    """Run a finite gate: detect, one deterministic repair batch, independently verify."""
+    """Run a finite structured/NER gate with one deterministic replacement batch."""
     aliases = [str(row["text"]) for row in redactions if row.get("detector") != "privacy_repair"]
     approved = _approved_types(policy)
     candidate_hash = sha256_bytes(deidentified_text.encode("utf-8"))
-
-    model_spans, first_findings, first_metrics = _detect(
-        deidentified_text, backend, max_tokens, "candidate_detection", policy)
-    repair_spans = _deterministic_repairs(deidentified_text) + _alias_repairs(
+    ner_backend = ner_backend or NullNERBackend()
+    authoritative = _deterministic_repairs(deidentified_text) + _alias_repairs(
         deidentified_text, redactions)
-    repair_spans.extend(row for row in model_spans if row.identifier_type in approved)
-    coverage_input = _mask_spans_preserving_offsets(deidentified_text, repair_spans)
-    coverage_spans, coverage_findings, coverage_metrics = _detect(
-        coverage_input, backend, max_tokens, "candidate_coverage", policy)
-    repair_spans.extend(row for row in coverage_spans if row.identifier_type in approved)
+    ner_input = _mask_spans_preserving_offsets(deidentified_text, authoritative)
+    ner_rows = ner_backend.detect(ner_input)
+    ner_repairs, _, first_metrics = _classify_ner_candidates(
+        document, ner_input, ner_rows, backend, max_tokens, ner_candidates_per_call,
+        approved, "candidate_classification")
+    ner_repairs = _expand_classified_repairs(deidentified_text, ner_repairs)
+    repair_spans = authoritative + ner_repairs
     repaired = deidentified_text
     repair_count = 0
     if repair_spans and maximum_repairs > 0:
@@ -440,35 +377,37 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
             document, deidentified_text, repair_spans, redactions)
 
     deterministic_final = _scan(repaired, aliases)
-    _, final_model_findings, final_metrics = _detect(
-        repaired, backend, max_tokens, "independent_final_review", policy)
-    grounded_final = [row for row in final_model_findings
-                      if row.grounded and row.finding_type in approved]
-    review_items = [row for row in final_model_findings
-                    if row.disposition == "review_required"]
-    advisories = [row for row in first_findings + coverage_findings + final_model_findings
-                  if row.disposition == "advisory"]
+    final_ner_rows = ner_backend.detect(repaired)
+    final_repairs, final_findings, final_metrics = _classify_ner_candidates(
+        document, repaired, final_ner_rows, backend, max_tokens, ner_candidates_per_call,
+        approved, "independent_final_classification")
+    grounded_final = [row for row in final_findings if row.disposition == "confirmed"]
+    review_items = [row for row in final_findings if row.disposition == "review_required"]
+    ner_unavailable = getattr(ner_backend, "name", "none") == "none"
 
-    if deterministic_final or grounded_final:
+    if deterministic_final or grounded_final or final_repairs:
         status = "withheld"
         reasons = ["confirmed_residual_privacy_finding"]
     elif review_items:
         status = "review_required"
-        reasons = sorted({
-            ("model_detection_incomplete" if row.finding_type == "model_detection_incomplete"
-             else "contextual_reidentification_review") for row in review_items
-        })
+        reasons = ["ambiguous_ner_candidate_review"]
+    elif ner_unavailable:
+        status = "review_required"
+        reasons = ["ner_validation_unavailable"]
     else:
         status = "validated_candidate"
-        reasons = (["unsupported_model_advisory"] if advisories else [])
+        reasons = []
 
-    confidences = (first_metrics["model_confidences"]
-                   + coverage_metrics["model_confidences"]
-                   + final_metrics["model_confidences"])
+    confidences = first_metrics["model_confidences"] + final_metrics["model_confidences"]
     model_confidence = min(confidences) if confidences else None
-    final_findings = deterministic_final + grounded_final + review_items + advisories
+    terminal_findings = deterministic_final + grounded_final + review_items
+    if ner_unavailable:
+        terminal_findings.append(PrivacyFinding(
+            finding_type="ner_validation_unavailable", detector="model", grounded=False,
+            disposition="review_required",
+        ))
     unique = {(row.finding_type, row.start, row.end, row.detector, row.disposition): row
-              for row in final_findings}
+              for row in terminal_findings}
     result = PrivacyResult(
         application_id=document.application_id, document_id=document.document_id,
         release_status=status, reason_codes=reasons, findings=list(unique.values()),
@@ -476,26 +415,25 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         model_qa_confidence=model_confidence,
         content_sha256=(sha256_bytes(repaired.encode("utf-8"))
                         if status == "validated_candidate" else None),
-        advisory_count=len(advisories), confirmed_finding_count=(
-            len(deterministic_final) + len(grounded_final)), validation_passes=3,
+        advisory_count=first_metrics["preserved"] + final_metrics["preserved"],
+        confirmed_finding_count=(len(deterministic_final) + len(grounded_final)),
+        validation_passes=2,
     )
-    raw_responses = (first_metrics["raw_responses"] + coverage_metrics["raw_responses"]
-                     + final_metrics["raw_responses"])
+    raw_responses = first_metrics["raw_responses"] + final_metrics["raw_responses"]
     return repaired, result, redactions, {
-        "calls": (first_metrics["calls"] + coverage_metrics["calls"]
-                  + final_metrics["calls"]),
+        "calls": first_metrics["calls"] + final_metrics["calls"],
         "repairs": 1 if repair_count else 0,
         "repair_span_count": repair_count,
-        "input_tokens": (first_metrics["input_tokens"] + coverage_metrics["input_tokens"]
-                         + final_metrics["input_tokens"]),
-        "output_tokens": (first_metrics["output_tokens"] + coverage_metrics["output_tokens"]
-                          + final_metrics["output_tokens"]),
+        "input_tokens": first_metrics["input_tokens"] + final_metrics["input_tokens"],
+        "output_tokens": first_metrics["output_tokens"] + final_metrics["output_tokens"],
         "inference_seconds": (first_metrics["inference_seconds"]
-                              + coverage_metrics["inference_seconds"]
                               + final_metrics["inference_seconds"]),
         "candidate_content_sha256": candidate_hash,
         "final_content_sha256": sha256_bytes(repaired.encode("utf-8")),
-        "unsupported_advisory_count": len(advisories),
+        "ner_backend": getattr(ner_backend, "name", "none"),
+        "ner_candidate_count": len(ner_rows),
+        "ner_final_candidate_count": len(final_ner_rows),
+        "ner_preserved_count": first_metrics["preserved"] + final_metrics["preserved"],
         "confirmed_residual_count": len(deterministic_final) + len(grounded_final),
         "_raw_responses": raw_responses,
     }

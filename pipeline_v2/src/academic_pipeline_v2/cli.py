@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from .config import load_config
+from .audit import build_privacy_audit
 from .evaluation import evaluate_run
 from .exporter import validate_candidate_package
 from .pipeline import (
@@ -40,6 +41,9 @@ def parser() -> argparse.ArgumentParser:
     action = migrate.add_mutually_exclusive_group(required=True)
     action.add_argument("--dry-run", action="store_true")
     action.add_argument("--apply", action="store_true")
+    audit = commands.add_parser("audit-privacy")
+    audit.add_argument("--config", type=Path, required=True)
+    audit.add_argument("--per-type", type=int, default=5)
     return root
 
 
@@ -91,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = registry.import_v1(payload, sha256_file(args.v1_registry), args.apply)
             finally:
                 registry.close()
+        elif args.command == "audit-privacy":
+            result = build_privacy_audit(config, max(1, args.per_type))
         else:
             raise ValueError("unsupported_command")
         print(json.dumps(result, indent=2, sort_keys=True, default=str))

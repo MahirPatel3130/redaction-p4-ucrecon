@@ -8,11 +8,12 @@ The source PDF is processed once into protected canonical text. Native PyMuPDF e
 when reliable; PaddleOCR handles deficient pages. All later model extraction, identity resolution,
 de-identification, finite privacy validation, and export reuse the cached canonical representation.
 
-Privacy validation is evidence-grounded and terminating. Qwen performs two bounded discovery
-passes over the same candidate, followed by at most one deterministic replacement batch and one
-independent final review. The coverage pass masks already discovered spans without changing source
-offsets. Model offsets are never trusted, unsupported
-model claims cannot delete text, and repeated generative repair is prohibited. The terminal states
+Privacy validation is evidence-grounded and terminating. Grounded structured fields, deterministic
+patterns, and protected aliases are authoritative. A local offline NER model proposes additional
+source spans; Qwen only classifies those bounded candidates as `replace`, `preserve`, or `review`.
+It cannot invent text or offsets. Code performs at most one replacement batch and then repeats the
+independent NER coverage check. Contextual re-identification is assessed separately at application
+level and never drives character-span deletion. The terminal states
 are `validated_candidate`, `review_required`, and `withheld`. Only `validated_candidate` documents
 enter the candidate researcher package; they still require the configured stratified human review
 before final export.
@@ -42,6 +43,20 @@ conda env create -f environments/pipeline.yml
 conda activate academic-pipeline-v2
 python -m pip install --no-deps -e .
 ```
+
+Install exactly one offline NER adapter in the pipeline environment (both may be installed for a
+paired benchmark):
+
+```bash
+python -m pip install -e '.[ner-spacy]'
+# or
+python -m pip install -e '.[ner-gliner]'
+```
+
+Stage the NER weights before entering offline mode. Production configuration must point to an
+existing local directory; V2 will not download NER weights at runtime. Suggested benchmark models
+are spaCy `en_core_web_lg` and `urchade/gliner_medium-v2.1`. Neither is automatically designated the
+winner: compare recall, false-positive replacements, withholding, latency, and memory first.
 
 On an air-gapped production host, stage all wheels, PaddleOCR models, and LLM weights through the
 approved process first. Runtime commands must not download dependencies or models.
@@ -81,6 +96,10 @@ Copy `configs/default.yaml` to a protected location and set:
 - A persistent protected `state_root`.
 - The local model name served by vLLM.
 - The loopback endpoint and privacy policy path.
+- `ner.enabled: true`, one of `spacy` or `gliner`, and the staged local `ner.model_path`.
+
+Leaving NER disabled is fail-closed: documents become `review_required` rather than being treated as
+privacy validated.
 
 Paths are configuration-relative when not absolute. Do not commit production configuration if it
 contains protected paths.
@@ -95,6 +114,16 @@ academic-pipeline-v2 status --config /protected/v2/config.yaml
 academic-pipeline-v2 export --config /protected/v2/config.yaml --candidate
 academic-pipeline-v2 validate-release --config /protected/v2/config.yaml
 ```
+
+Create a protected audit sample of any remaining findings before changing policy or prompts:
+
+```bash
+academic-pipeline-v2 audit-privacy --config /protected/v2/config.yaml --per-type 5
+```
+
+The resulting `protected/audit/privacy_findings.csv` contains P4 text and must never be transferred
+with the researcher package. It is intended to label representative findings as true identifiers,
+false positives, or ambiguous cases.
 
 `process` also runs canonical extraction when it has not already completed. Canonical extraction,
 semantic extraction, and privacy validation are independently cached.
@@ -126,11 +155,12 @@ After interruption, or to retry only failed/withheld stages:
 academic-pipeline-v2 resume --config /protected/v2/config.yaml
 ```
 
-Validated and review-required compatible checkpoints are reused. Failed canonical/semantic stages
-and withheld privacy stages are retried. `privacy.maximum_repairs` remains configuration-compatible,
-but privacy validation performs exactly one deterministic repair batch when it is greater than zero.
-There is no model-driven repair loop. Unresolved documents remain withheld without blocking safe
-documents.
+Validated compatible checkpoints are reused. Failed canonical/semantic stages and withheld or
+review-required privacy stages are retried. Changing the NER backend, model path, threshold, or
+candidate batch size invalidates only privacy artifacts; canonical and semantic artifacts remain
+reusable. `privacy.maximum_repairs` remains configuration-compatible, but privacy validation performs
+exactly one deterministic replacement batch when it is greater than zero. There is no generative
+repair loop. Unresolved documents remain withheld without blocking safe documents.
 
 Example detached production run:
 
@@ -181,6 +211,10 @@ academic-pipeline-v2 evaluate --config /protected/v2/benchmark_qwen14b.yaml
 
 Compare `metrics/evaluation.json`, `metrics/run_summary.json`, and document timings. Do not select a
 winner without paired accuracy, privacy, latency, token, and VRAM measurements.
+
+The timing files include `structured_mention_count`, `ner_backend`, NER candidate counts, and
+preserved-candidate counts. Dataset-level contextual advisories are stored separately under
+`protected/contextual_risk/`; they do not change span-level release status.
 
 ## Optional v1 identity migration
 

@@ -1,6 +1,8 @@
 SYSTEM = """You extract source-grounded data for an offline protected research pipeline.
 Return only JSON matching the supplied schema. Never infer a value not present in SOURCE_TEXT.
-Every found value and every identifier mention must include exact document-global character offsets.
+For semantic extraction, every found value and identifier mention must include exact document-global
+character offsets. For candidate-classification tasks, classify only supplied candidate IDs and do
+not invent spans or offsets.
 Do not rewrite prose. Confidence values are your own assessment in [0,1], not calculated scores.
 """
 
@@ -36,25 +38,20 @@ SOURCE_TEXT:
 {text}
 """
 
-PRIVACY_PROMPT = """TASK=privacy_detection_only
-PASS={pass_name}
-CHUNK_ID={chunk_id}
+NER_CLASSIFICATION_PROMPT = """TASK=privacy_candidate_classification
+Classify only the supplied source-grounded NER candidates under this policy.
 POLICY_REPLACE_TYPES={replace_types}
-Inspect the numbered lines of candidate de-identified content. This is detection only: never
-rewrite the content and never calculate character offsets. For each visible violation, copy the
-exact visible text and its numbered source line. Use finding_kind=contextual_risk only when a
-credible identifying combination has no single visible span.
-Opaque placeholders like [[PERSON:person_...]], [[ORG:org_...]], and [[WORK:work_...]] are safe.
-Mark safe=true only when no visible violation or contextual risk remains.
-Return at most 50 unique findings in document order.
-Use only these identifier_type values: person_name, organization, work_title, email,
-phone_number, postal_address, website, unique_identifier, signature, date. Never report any span
-inside an opaque [[...]] placeholder. Do not report inferred names, paraphrases, pronouns, common
-nouns, generic roles, generic academic terms, ordinary evaluation prose, or non-identifying dates.
-Only categories listed in POLICY_REPLACE_TYPES are prohibited visible identifiers. Use
-finding_kind=contextual_risk for a credible linkable combination that the policy does not express
-as one prohibited visible span.
 
-CANDIDATE_TEXT:
-{text}
+For each candidate_id return exactly one decision:
+- replace: it is a visible named person, named organization, publication/work title, direct
+  identifier, personal address, or other policy-prohibited identifier.
+- preserve: it is generic academic language, a generic role/title, an ordinary word, a retained
+  date, or not identifying under the policy.
+- review: its classification is genuinely ambiguous and cannot safely be decided from context.
+
+Never invent candidates, rewrite text, or return explanations. A location alone is not a postal
+address. Opaque [[...]] placeholders are safe.
+
+CANDIDATES_JSON:
+{candidates}
 """

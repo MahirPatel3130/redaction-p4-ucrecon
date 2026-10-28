@@ -14,6 +14,7 @@ import yaml
 from . import PIPELINE_VERSION, PROMPT_VERSION, SCHEMA_VERSION
 from .checkpoints import CheckpointStore, stage_fingerprint
 from .config import PipelineConfig
+from .contextual import assess_contextual_risk
 from .errors import ConfigurationError, ContractError, InferenceError, PipelineError
 from .exporter import build_candidate, release_candidate, select_review_sample, validate_review
 from .exporter import validate_candidate_package
@@ -24,6 +25,7 @@ from .models import (
     ApplicationRecord, CVExtraction, CanonicalDocument, DocumentRecord, DocumentType,
     LetterExtraction, PrivacyResult,
 )
+from .ner import create_ner_backend
 from .privacy import apply_replacements, validate_privacy
 from .registry import EntityRegistry
 from .semantic import extract_cv, extract_letter
@@ -149,8 +151,9 @@ def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) 
 def _privacy_fingerprint(config: PipelineConfig, semantic_fp: str,
                          resolved: dict[str, Any]) -> str:
     policy = yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8"))
-    return stage_fingerprint("privacy_v2_finite_gate_2", semantic_fp, config.model.model,
-                             fingerprint(policy), resolved.get("mention_map", {}))
+    return stage_fingerprint("privacy_v3_structured_ner_1", semantic_fp, config.model.model,
+                             fingerprint(policy), config.ner.model_dump(mode="json"),
+                             resolved.get("mention_map", {}))
 
 
 def _load_canonicals(config: PipelineConfig, documents: list[DocumentRecord]) -> dict[str, CanonicalDocument]:
@@ -172,6 +175,7 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
     canonicals = _load_canonicals(config, documents)
     store = CheckpointStore(protected, config.cache_fingerprint())
     backend = create_backend(config.model)
+    ner_backend = create_ner_backend(config.ner)
     semantic: dict[str, CVExtraction | LetterExtraction] = {}
     semantic_metrics: dict[str, dict[str, Any]] = {}
 
@@ -283,6 +287,7 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                     canonical, deidentified, document_redactions, backend,
                     config.model.qa_max_tokens, config.privacy.maximum_repairs,
                     yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8")),
+                    ner_backend, config.ner.candidates_per_call,
                 )
                 raw_responses = privacy_metrics.pop("_raw_responses", [])
                 if config.model.store_raw_responses:
@@ -360,6 +365,13 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                   + privacy_row.get("output_tokens", 0)),
                 "model_calls": semantic_row.get("calls", 0) + privacy_row.get("calls", 0),
                 "repair_count": semantic_row.get("repairs", 0) + privacy_row.get("repairs", 0),
+                "structured_mention_count": sum(
+                    mention.detector == "structured" for mention in
+                    (row["extraction"].mentions if row.get("extraction") else [])),
+                "ner_backend": privacy_row.get("ner_backend", "none"),
+                "ner_candidate_count": privacy_row.get("ner_candidate_count", 0),
+                "ner_final_candidate_count": privacy_row.get("ner_final_candidate_count", 0),
+                "ner_preserved_count": privacy_row.get("ner_preserved_count", 0),
                 "status": row["processing_status"], "release_status": row["privacy"].release_status,
                 "failure_code": row.get("failure_code"),
             })
@@ -367,6 +379,9 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
         fields = list(timing_rows[0]) if timing_rows else ["document_id"]
         write_csv(metrics / "document_timings.csv", fields, timing_rows, 0o600)
         summary = summarize(processed, timing_rows)
+        contextual_summary = assess_contextual_risk(
+            applications, processed, protected / "contextual_risk")
+        summary["contextual_risk"] = contextual_summary
         atomic_json(metrics / "run_summary.json", summary)
         atomic_json(protected / "processed_index.json", {
             "schema_version": SCHEMA_VERSION,
@@ -380,6 +395,7 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
         return summary
     finally:
         registry.close()
+        ner_backend.close()
         backend.close()
         ensure_private_tree(protected)
 
@@ -414,6 +430,12 @@ def summarize(processed: list[dict[str, Any]], timings: list[dict[str, Any]]) ->
         "input_token_count": sum(int(row.get("input_tokens", 0)) for row in timings),
         "output_token_count": sum(int(row.get("output_tokens", 0)) for row in timings),
         "repair_count": sum(int(row.get("repair_count", 0)) for row in timings),
+        "structured_mention_count": sum(
+            int(row.get("structured_mention_count", 0)) for row in timings),
+        "ner_candidate_count": sum(int(row.get("ner_candidate_count", 0)) for row in timings),
+        "ner_final_candidate_count": sum(
+            int(row.get("ner_final_candidate_count", 0)) for row in timings),
+        "ner_preserved_count": sum(int(row.get("ner_preserved_count", 0)) for row in timings),
         "peak_gpu_vram_bytes": None,
         "peak_gpu_vram_note": "Collect from the colocated vLLM server metrics on the restricted host",
     }

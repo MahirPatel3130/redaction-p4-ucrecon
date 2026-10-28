@@ -134,7 +134,7 @@ class EntityMention(StrictModel):
     ] = "unknown"
     text: str
     model_confidence: float | None = Field(default=None, ge=0, le=1)
-    detector: Literal["model", "regex", "alias", "privacy_repair"]
+    detector: Literal["model", "structured", "regex", "alias", "privacy_repair"]
     evidence: EvidenceSpan
     grounded: bool = False
     local_entity_id: str | None = None

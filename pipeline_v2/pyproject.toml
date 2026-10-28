@@ -17,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 ocr = ["paddleocr>=3,<4", "paddlepaddle>=3,<4"]
 test = ["pytest>=8,<9", "pytest-cov>=5,<7"]
+ner-spacy = ["spacy>=3.8,<4"]
+ner-gliner = ["gliner>=0.2,<1"]
+ner-all = ["spacy>=3.8,<4", "gliner>=0.2,<1"]
 
 [project.scripts]
 academic-pipeline-v2 = "academic_pipeline_v2.cli:main"

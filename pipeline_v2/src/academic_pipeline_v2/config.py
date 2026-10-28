@@ -54,6 +54,31 @@ class ModelConfig(BaseModel):
         return self
 
 
+class NERConfig(BaseModel):
+    enabled: bool = False
+    backend: str = "none"
+    model_path: Path | None = None
+    device: str = "cpu"
+    minimum_score: float = Field(0.65, ge=0, le=1)
+    chunk_characters: int = Field(2000, ge=256, le=20000)
+    candidates_per_call: int = Field(40, ge=1, le=100)
+
+    @field_validator("backend")
+    @classmethod
+    def valid_backend(cls, value: str) -> str:
+        if value not in {"none", "spacy", "gliner", "mock"}:
+            raise ValueError("NER backend must be none, spacy, gliner, or mock")
+        return value
+
+    @model_validator(mode="after")
+    def enabled_backend(self) -> "NERConfig":
+        if self.enabled and self.backend == "none":
+            raise ValueError("enabled NER requires a non-none backend")
+        if self.enabled and self.backend != "mock" and self.model_path is None:
+            raise ValueError("enabled NER requires a local model_path")
+        return self
+
+
 class PrivacyConfig(BaseModel):
     policy_path: Path
     # Retained for configuration compatibility. The finite gate performs at most one
@@ -74,6 +99,7 @@ class PipelineConfig(BaseModel):
     cpu_workers: int = Field(4, ge=1)
     ocr: OCRConfig = Field(default_factory=OCRConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
+    ner: NERConfig = Field(default_factory=NERConfig)
     privacy: PrivacyConfig
 
     @field_validator("input_roots")
@@ -97,6 +123,10 @@ class PipelineConfig(BaseModel):
             if path_value:
                 path = Path(path_value)
                 data["ocr"][key] = path if path.is_absolute() else (base / path).resolve()
+        ner_path = data["ner"].get("model_path")
+        if ner_path:
+            path = Path(ner_path)
+            data["ner"]["model_path"] = path if path.is_absolute() else (base / path).resolve()
         policy = Path(data["privacy"]["policy_path"])
         data["privacy"]["policy_path"] = policy if policy.is_absolute() else (base / policy).resolve()
         return PipelineConfig.model_validate(data)

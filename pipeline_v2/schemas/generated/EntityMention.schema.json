@@ -137,6 +137,7 @@
     "detector": {
       "enum": [
         "model",
+        "structured",
         "regex",
         "alias",
         "privacy_repair"
