@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from . import SCHEMA_VERSION
 from .detectors import deterministic_spans, section_inventory
@@ -224,16 +224,30 @@ def _merge_raw_cv(chunks: list[RawCV]) -> RawCV:
 def _validated_completion(backend: InferenceBackend, task: str, prompt: str,
                           contract: type[RawModel], max_tokens: int) -> tuple[RawModel, list[Any]]:
     responses = []
-    response = backend.complete(task, prompt, contract.model_json_schema(), max_tokens)
-    responses.append(response)
-    try:
-        return contract.model_validate(response.payload), responses
-    except Exception:
-        correction = (prompt + "\nVALIDATION_CORRECTION: The previous JSON did not match the schema. "
-                      "Return a complete, shorter schema-valid object; do not add prose.")
-        response = backend.complete(task, correction, contract.model_json_schema(), max_tokens)
+    request = prompt
+    # One primary response plus two bounded schema corrections.  Correction
+    # feedback contains only field locations and error types, never source text
+    # values or the invalid response payload.
+    for attempt in range(3):
+        response = backend.complete(task, request, contract.model_json_schema(), max_tokens)
         responses.append(response)
-        return contract.model_validate(response.payload), responses
+        try:
+            return contract.model_validate(response.payload), responses
+        except ValidationError as exc:
+            if attempt == 2:
+                raise
+            issues = [{"location": [str(part) for part in row["loc"]],
+                       "type": row["type"]}
+                      for row in exc.errors(include_url=False, include_context=False,
+                                            include_input=False)]
+            request = (
+                prompt
+                + "\nVALIDATION_CORRECTION: The previous JSON violated the required schema at "
+                + json.dumps(issues, separators=(",", ":"))
+                + ". Return a complete, shorter schema-valid object. Every non-model_failed "
+                  "semantic result must have numeric model_confidence. Do not add prose."
+            )
+    raise RuntimeError("unreachable_validation_loop")
 
 
 def _status(value: str, allow_not_applicable: bool = False) -> ValueStatus:

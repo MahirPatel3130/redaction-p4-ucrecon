@@ -25,7 +25,9 @@ from academic_pipeline_v2.pipeline import (
 )
 from academic_pipeline_v2.registry import EntityRegistry
 from academic_pipeline_v2.inference import VLLMBackend
-from academic_pipeline_v2.semantic import RawField, RawMention, _field, _mentions
+from academic_pipeline_v2.semantic import (
+    RawField, RawLetter, RawMention, _field, _mentions, _validated_completion,
+)
 from academic_pipeline_v2.util import sha256_file
 
 
@@ -97,6 +99,31 @@ def test_semantic_confidence_is_required_and_never_invented() -> None:
                  start=0, end=9)
     failed = RawField(value=None, status="model_failed", model_confidence=None)
     assert failed.model_confidence is None
+
+
+def test_semantic_validation_repair_reports_safe_locations_and_retries() -> None:
+    class Backend:
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, task, prompt, schema, max_tokens):
+            self.prompts.append(prompt)
+            payloads = [
+                {"status": "found", "mentions": [], "relationships": []},
+                {"status": "found", "model_confidence": None,
+                 "mentions": [], "relationships": []},
+                {"status": "found", "model_confidence": 0.91,
+                 "mentions": [], "relationships": []},
+            ]
+            return ModelResponse(payload=payloads[len(self.prompts) - 1],
+                                 latency_seconds=0.01)
+
+    backend = Backend()
+    result, responses = _validated_completion(backend, "letter", "SOURCE", RawLetter, 100)
+    assert result.model_confidence == 0.91
+    assert len(responses) == 3
+    assert "model_confidence" in backend.prompts[1]
+    assert "SOURCE" in backend.prompts[2]
 
 
 def test_package_leak_scan_uses_token_boundaries_and_masks_opaque_ids(tmp_path: Path) -> None:
