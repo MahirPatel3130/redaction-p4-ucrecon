@@ -57,10 +57,13 @@ class VLLMBackend:
                 response.raise_for_status()
                 body = response.json()
                 choice = body["choices"][0]
-                if choice.get("finish_reason") == "length":
-                    raise InferenceError("model_output_truncated")
                 raw = choice["message"]["content"]
-                payload = _parse_json_content(raw)
+                try:
+                    payload = _parse_json_content(raw)
+                except InferenceError as exc:
+                    if choice.get("finish_reason") == "length":
+                        raise InferenceError("model_output_truncated") from exc
+                    raise
                 usage = body.get("usage", {})
                 return ModelResponse(
                     payload=payload,

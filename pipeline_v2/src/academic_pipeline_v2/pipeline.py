@@ -274,7 +274,14 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                             "cached": True}}
             started = time.monotonic()
             try:
-                deidentified, document_redactions = apply_replacements(canonical, extraction.mentions)
+                deidentified = ""
+                document_redactions: list[dict[str, Any]] = []
+                if cached is not None and retry_failed:
+                    deidentified = str(cached.get("deidentified_text", ""))
+                    document_redactions = list(cached.get("redactions", []))
+                if not deidentified:
+                    deidentified, document_redactions = apply_replacements(
+                        canonical, extraction.mentions)
                 deidentified, privacy, document_redactions, privacy_metrics = validate_privacy(
                     canonical, deidentified, document_redactions, backend,
                     config.model.qa_max_tokens, config.privacy.maximum_repairs,
@@ -285,7 +292,9 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                 f"{record.document_id}.privacy.json",
                                 {"document_id": record.document_id, "responses": raw_responses})
                 artifact = {"privacy": privacy.model_dump(mode="json"),
-                            "deidentified_text": deidentified if privacy.release_status == "released" else "",
+                            # This checkpoint is protected. Retaining withheld progress allows a
+                            # resume to continue repair without reprocessing the original prose.
+                            "deidentified_text": deidentified,
                             "redactions": document_redactions}
                 checkpoint.timings_seconds["privacy"] = time.monotonic() - started
                 checkpoint.metrics["privacy"] = privacy_metrics

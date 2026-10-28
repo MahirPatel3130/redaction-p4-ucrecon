@@ -140,7 +140,8 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                      redactions: list[dict[str, Any]], backend: InferenceBackend,
                      max_tokens: int, maximum_repairs: int) -> tuple[str, PrivacyResult,
                                                                     list[dict[str, Any]], dict[str, Any]]:
-    aliases = [row["text"] for row in redactions]
+    aliases = [row["text"] for row in redactions
+               if row.get("detector") != "privacy_repair"]
     current = deidentified_text
     findings = _scan(current, aliases)
     repairs = 0
