@@ -357,7 +357,7 @@ def test_privacy_review_ignores_placeholder_spans() -> None:
     assert redactions == []
 
 
-def test_privacy_review_rejects_ungrounded_text_and_offsets() -> None:
+def test_privacy_review_withholds_ungrounded_text_and_offsets() -> None:
     class Backend:
         def complete(self, task, prompt, schema, max_tokens):
             text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
@@ -384,7 +384,10 @@ def test_privacy_review_rejects_ungrounded_text_and_offsets() -> None:
     )
     repaired, result, redactions, _ = validate_privacy(
         document, text, [], Backend(), 256, 1)
-    assert result.release_status == "released"
+    assert result.release_status == "withheld"
+    assert result.reason_codes == ["ungrounded_model_finding"]
+    assert len(result.findings) == 1
+    assert result.findings[0].grounded is False
     assert repaired == text
     assert redactions == []
 

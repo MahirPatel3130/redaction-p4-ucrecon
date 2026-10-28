@@ -152,6 +152,7 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     inference_seconds = 0.0
     model_confidence: float | None = None
     raw_responses: list[dict[str, Any]] = []
+    ungrounded_model_findings: list[PrivacyFinding] = []
     while repairs <= maximum_repairs:
         deterministic_findings = _scan(current, aliases)
         prompt = PRIVACY_PROMPT.format(text=current)
@@ -180,15 +181,25 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
             for row in deterministic_findings if row.start is not None and row.end is not None
         ]
         for row in review.findings:
-            if (0 <= row.start < row.end <= len(current)
-                    and current[row.start:row.end] == row.text
-                    and not _overlaps_placeholder(current, row.start, row.end)):
+            valid_range = 0 <= row.start < row.end <= len(current)
+            if valid_range and _overlaps_placeholder(current, row.start, row.end):
+                continue
+            if valid_range and current[row.start:row.end] == row.text:
                 model_findings.append(PrivacyFinding(
                     finding_type=row.identifier_type, start=row.start, end=row.end,
                     detector="model", grounded=True,
                 ))
                 valid_spans.append((row.start, row.end, row.identifier_type))
-        findings = deterministic_findings + model_findings
+            else:
+                ungrounded_model_findings.append(PrivacyFinding(
+                    finding_type="ungrounded_model_finding",
+                    start=row.start if valid_range else None,
+                    end=row.end if valid_range else None,
+                    detector="model", grounded=False,
+                ))
+        findings = deterministic_findings + model_findings + ungrounded_model_findings
+        if ungrounded_model_findings:
+            break
         if not findings and review.safe:
             break
         if repairs >= maximum_repairs or not valid_spans:
@@ -218,14 +229,17 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     # can be ordinary repeated words and would otherwise create cascading false leaks.
     findings = _scan(current, aliases) + [
         row for row in findings if row.detector == "model" and row.start is not None
-        and row.end is not None and row.end <= len(current)
-        and "[[" not in current[row.start:row.end]
+        and row.end is not None and (not row.grounded or (row.end <= len(current)
+        and "[[" not in current[row.start:row.end]))
     ]
     unique = {(row.finding_type, row.start, row.end, row.detector): row for row in findings}
     findings = list(unique.values())
     released = not findings and model_confidence is not None and model_confidence >= 0.90
-    reasons = [] if released else (["residual_privacy_finding"] if findings else
-                                   ["privacy_model_confidence_below_threshold"])
+    reasons = [] if released else (
+        ["ungrounded_model_finding"] if any(not row.grounded for row in findings)
+        else (["residual_privacy_finding"] if findings else
+              ["privacy_model_confidence_below_threshold"])
+    )
     result = PrivacyResult(
         application_id=document.application_id, document_id=document.document_id,
         release_status="released" if released else "withheld", reason_codes=reasons,
