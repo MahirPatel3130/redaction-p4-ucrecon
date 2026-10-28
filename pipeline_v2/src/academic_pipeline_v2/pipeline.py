@@ -142,7 +142,7 @@ def extract_stage(config: PipelineConfig, retry_failed: bool = False) -> list[Ca
 
 
 def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) -> str:
-    return stage_fingerprint("semantic_v2", PROMPT_VERSION, config.model.model,
+    return stage_fingerprint("semantic_v3_bounded_grounding_1", PROMPT_VERSION, config.model.model,
                              config.model.backend, sha256_file(
                                  config.output_root / "protected" / "checkpoints" /
                                  canonical.document_id / "canonical.json"))
@@ -151,7 +151,7 @@ def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) 
 def _privacy_fingerprint(config: PipelineConfig, semantic_fp: str,
                          resolved: dict[str, Any]) -> str:
     policy = yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8"))
-    return stage_fingerprint("privacy_v3_structured_ner_2", semantic_fp, config.model.model,
+    return stage_fingerprint("privacy_v3_structured_ner_3", semantic_fp, config.model.model,
                              fingerprint(policy), config.ner.model_dump(mode="json"),
                              resolved.get("mention_map", {}))
 

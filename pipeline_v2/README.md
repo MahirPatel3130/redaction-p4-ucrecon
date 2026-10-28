@@ -12,8 +12,9 @@ Privacy validation is evidence-grounded and terminating. Grounded structured fie
 patterns, and protected aliases are authoritative. A local offline NER model proposes additional
 source spans. Policy-prohibited PERSON, ORG, and WORK labels are accepted as grounded NER evidence;
 Qwen only classifies ambiguous candidates such as locations that may or may not be postal addresses.
-It cannot invent text or offsets. Code unions full-context and masked-context NER scans, performs at
-most one replacement batch, and then repeats the independent NER coverage check. Contextual
+It cannot invent text or offsets. Code unions full-context and masked-context NER scans before one
+replacement batch, then verifies substitutions and scans for deterministic identifiers and accepted
+aliases. It does not rerun a context-sensitive NER model over placeholder-modified prose. Contextual
 re-identification is assessed separately at application
 level and never drives character-span deletion. The terminal states
 are `validated_candidate`, `review_required`, and `withheld`. Only `validated_candidate` documents

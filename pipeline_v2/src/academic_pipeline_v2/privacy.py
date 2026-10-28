@@ -384,7 +384,7 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     masked_context_rows = ner_backend.detect(ner_input)
     ner_rows = list({(row.start, row.end, row.identifier_type): row
                      for row in full_context_rows + masked_context_rows}.values())
-    ner_repairs, _, first_metrics = _classify_ner_candidates(
+    ner_repairs, first_findings, first_metrics = _classify_ner_candidates(
         document, deidentified_text, ner_rows, backend, max_tokens, ner_candidates_per_call,
         approved, "candidate_classification")
     ner_repairs = _expand_classified_repairs(deidentified_text, ner_repairs)
@@ -395,16 +395,19 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         repaired, repair_count = _apply_repair_batch(
             document, deidentified_text, repair_spans, redactions)
 
-    deterministic_final = _scan(repaired, aliases)
-    final_ner_rows = ner_backend.detect(repaired)
-    final_repairs, final_findings, final_metrics = _classify_ner_candidates(
-        document, repaired, final_ner_rows, backend, max_tokens, ner_candidates_per_call,
-        approved, "independent_final_classification")
-    grounded_final = [row for row in final_findings if row.disposition == "confirmed"]
-    review_items = [row for row in final_findings if row.disposition == "review_required"]
+    accepted_aliases = [deidentified_text[row.start:row.end] for row in ner_repairs]
+    deterministic_final = _scan(repaired, aliases + accepted_aliases)
+    review_items = [row for row in first_findings if row.disposition == "review_required"]
+    unapplied_findings: list[PrivacyFinding] = []
+    if repair_spans and maximum_repairs == 0:
+        unapplied_findings = [PrivacyFinding(
+            finding_type=row.identifier_type, start=row.start, end=row.end,
+            detector="model" if row.detector.startswith("ner") else "substitution",
+            grounded=True, disposition="confirmed", model_confidence=row.model_confidence,
+        ) for row in repair_spans]
     ner_unavailable = getattr(ner_backend, "name", "none") == "none"
 
-    if deterministic_final or grounded_final or final_repairs:
+    if deterministic_final or unapplied_findings:
         status = "withheld"
         reasons = ["confirmed_residual_privacy_finding"]
     elif review_items:
@@ -417,16 +420,18 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         status = "validated_candidate"
         reasons = []
 
-    confidences = first_metrics["model_confidences"] + final_metrics["model_confidences"]
+    confidences = first_metrics["model_confidences"]
     model_confidence = min(confidences) if confidences else None
-    terminal_findings = deterministic_final + grounded_final + review_items
+    terminal_findings = deterministic_final + unapplied_findings + review_items
     if ner_unavailable:
         terminal_findings.append(PrivacyFinding(
             finding_type="ner_validation_unavailable", detector="model", grounded=False,
             disposition="review_required",
         ))
-    unique = {(row.finding_type, row.start, row.end, row.detector, row.disposition): row
+    unique = {(row.finding_type, row.start, row.end, row.disposition): row
               for row in terminal_findings}
+    confirmed_count = len({(row.start, row.end) for row in unique.values()
+                           if row.disposition == "confirmed"})
     result = PrivacyResult(
         application_id=document.application_id, document_id=document.document_id,
         release_status=status, reason_codes=reasons, findings=list(unique.values()),
@@ -434,28 +439,26 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         model_qa_confidence=model_confidence,
         content_sha256=(sha256_bytes(repaired.encode("utf-8"))
                         if status == "validated_candidate" else None),
-        advisory_count=first_metrics["preserved"] + final_metrics["preserved"],
-        confirmed_finding_count=(len(deterministic_final) + len(grounded_final)),
+        advisory_count=first_metrics["preserved"],
+        confirmed_finding_count=confirmed_count,
         validation_passes=2,
     )
-    raw_responses = first_metrics["raw_responses"] + final_metrics["raw_responses"]
+    raw_responses = first_metrics["raw_responses"]
     return repaired, result, redactions, {
-        "calls": first_metrics["calls"] + final_metrics["calls"],
+        "calls": first_metrics["calls"],
         "repairs": 1 if repair_count else 0,
         "repair_span_count": repair_count,
-        "input_tokens": first_metrics["input_tokens"] + final_metrics["input_tokens"],
-        "output_tokens": first_metrics["output_tokens"] + final_metrics["output_tokens"],
-        "inference_seconds": (first_metrics["inference_seconds"]
-                              + final_metrics["inference_seconds"]),
+        "input_tokens": first_metrics["input_tokens"],
+        "output_tokens": first_metrics["output_tokens"],
+        "inference_seconds": first_metrics["inference_seconds"],
         "candidate_content_sha256": candidate_hash,
         "final_content_sha256": sha256_bytes(repaired.encode("utf-8")),
         "ner_backend": getattr(ner_backend, "name", "none"),
         "ner_candidate_count": len(ner_rows),
-        "ner_final_candidate_count": len(final_ner_rows),
-        "ner_preserved_count": first_metrics["preserved"] + final_metrics["preserved"],
-        "ner_auto_accepted_count": (first_metrics["auto_accepted"]
-                                    + final_metrics["auto_accepted"]),
-        "confirmed_residual_count": len(deterministic_final) + len(grounded_final),
+        "ner_final_candidate_count": 0,
+        "ner_preserved_count": first_metrics["preserved"],
+        "ner_auto_accepted_count": first_metrics["auto_accepted"],
+        "confirmed_residual_count": confirmed_count,
         "_raw_responses": raw_responses,
     }
 

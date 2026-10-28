@@ -25,6 +25,7 @@ from academic_pipeline_v2.pipeline import (
 )
 from academic_pipeline_v2.registry import EntityRegistry
 from academic_pipeline_v2.inference import VLLMBackend
+from academic_pipeline_v2.semantic import RawField, RawMention, _field, _mentions
 from academic_pipeline_v2.util import sha256_file
 
 
@@ -434,7 +435,7 @@ def test_ner_candidate_can_be_preserved_without_redaction() -> None:
     assert result.release_status == "validated_candidate"
     assert repaired == text
     assert redactions == []
-    assert metrics["ner_preserved_count"] == 2
+    assert metrics["ner_preserved_count"] == 1
 
 
 def test_ambiguous_ner_candidate_requires_review() -> None:
@@ -477,6 +478,28 @@ def test_missing_ner_backend_prevents_automatic_validation() -> None:
     assert result.release_status == "review_required"
     assert result.reason_codes == ["ner_validation_unavailable"]
     assert repaired == text
+
+
+def test_structured_field_recovers_duplicate_value_inside_parent_bounds() -> None:
+    text = "[[PAGE:1]]\nExample University first.\nExample University second."
+    document = privacy_document(text)
+    second = text.rfind("Example University")
+    field = _field(document, RawField(
+        value="Example University", status="found", model_confidence=0.9,
+        start=None, end=None), bounds=(second, len(text)))
+    assert field.status == ValueStatus.FOUND
+    assert field.evidence[0].start == second
+    assert "offset_recovered_by_bounded_exact_match" in field.validation_flags
+
+
+def test_model_mention_with_bad_offsets_expands_to_exact_occurrences() -> None:
+    text = "[[PAGE:1]]\nNamed Person appeared. Named Person returned."
+    mentions = _mentions(privacy_document(text), [RawMention(
+        identifier_type="person_name", person_role="third_party", text="Named Person",
+        start=999, end=1011, model_confidence=0.9)])
+    model_mentions = [row for row in mentions if row.detector == "model"]
+    assert len(model_mentions) == 2
+    assert all(row.grounded for row in model_mentions)
 
 
 def test_real_ner_requires_explicit_local_model_path() -> None:

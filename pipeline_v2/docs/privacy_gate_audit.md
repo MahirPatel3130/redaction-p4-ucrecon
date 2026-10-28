@@ -16,11 +16,11 @@ the model was simultaneously proposing evidence, classifying policy, and decidin
 4. Qwen classification of ambiguous supplied candidate IDs only: `replace`, `preserve`, or
    `review`.
 5. Deterministic overlap resolution and one right-to-left replacement batch.
-6. A final deterministic and NER coverage pass over the resulting text.
+6. Final substitution verification plus deterministic identifier and accepted-alias scans.
 
 Qwen cannot invent a privacy candidate, provide an offset, or rewrite the document during this
 stage. An invalid NER span is rejected by code. A missing Qwen decision requires review. A confirmed
-final residual is withheld. If NER is unavailable, the document is `review_required`; it does not
+deterministic or accepted-alias residual is withheld. If NER is unavailable, the document is `review_required`; it does not
 silently pass.
 
 ## Contextual risk boundary
@@ -44,7 +44,8 @@ labels should inform model/threshold benchmarking rather than one-off policy wea
 
 ## Bounded performance
 
-There are at most two NER coverage scans and two bounded candidate-classification phases per
-document. Classification requests are split by `ner.candidates_per_call`; each candidate is tied to
-an exact validated span. There is at most one replacement batch. Runtime and destructive changes
+There are exactly two complementary pre-substitution NER scans: full context and context with known
+authoritative spans masked. Their union is classified once in batches controlled by
+`ner.candidates_per_call`. Each candidate is tied to an exact validated span. There is at most one
+replacement batch, followed only by deterministic verification. Runtime and destructive changes
 therefore remain finite regardless of model behavior.

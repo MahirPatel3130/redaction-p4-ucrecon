@@ -205,22 +205,42 @@ def _status(value: str, allow_not_applicable: bool = False) -> ValueStatus:
     return ValueStatus(value) if value in allowed else ValueStatus.MODEL_FAILED
 
 
+def _exact_positions(text: str, expected: str, lower: int = 0,
+                     upper: int | None = None) -> list[tuple[int, int]]:
+    upper = len(text) if upper is None else min(len(text), upper)
+    folded = text.casefold()
+    needle = expected.casefold()
+    result: list[tuple[int, int]] = []
+    cursor = max(0, lower)
+    while needle and cursor < upper:
+        position = folded.find(needle, cursor, upper)
+        if position < 0:
+            break
+        result.append((position, position + len(expected)))
+        cursor = position + max(1, len(expected))
+    return result
+
+
 def _evidence(document: CanonicalDocument, start: int | None, end: int | None,
-              expected: str | None = None) -> tuple[list[EvidenceSpan], list[str]]:
+              expected: str | None = None,
+              bounds: tuple[int | None, int | None] | None = None) -> tuple[
+                  list[EvidenceSpan], list[str]]:
     flags: list[str] = []
-    if start is None or end is None or start < 0 or end <= start or end > len(document.text):
+    direct_valid = (start is not None and end is not None and 0 <= start < end <= len(document.text))
+    direct_matches = bool(direct_valid and (expected is None or
+                          document.text[start:end].casefold() == expected.casefold()))
+    if not direct_matches:
         if expected:
-            matches = []
-            cursor = 0
-            while True:
-                position = document.text.casefold().find(expected.casefold(), cursor)
-                if position < 0:
-                    break
-                matches.append(position)
-                cursor = position + max(1, len(expected))
+            lower, upper = (bounds or (0, len(document.text)))
+            valid_bounds = (isinstance(lower, int) and isinstance(upper, int)
+                            and 0 <= lower < upper <= len(document.text))
+            matches = _exact_positions(document.text, expected,
+                                       lower if valid_bounds else 0,
+                                       upper if valid_bounds else len(document.text))
             if len(matches) == 1:
-                start, end = matches[0], matches[0] + len(expected)
-                flags.append("offset_recovered_by_unique_exact_match")
+                start, end = matches[0]
+                flags.append("offset_recovered_by_bounded_exact_match" if valid_bounds
+                             else "offset_recovered_by_unique_exact_match")
             else:
                 return [], ["ungrounded_value"]
         else:
@@ -236,13 +256,14 @@ def _evidence(document: CanonicalDocument, start: int | None, end: int | None,
                          extraction_method=method)], flags
 
 
-def _field(document: CanonicalDocument, raw: RawField, derived: bool = False) -> ExtractedField:
+def _field(document: CanonicalDocument, raw: RawField, derived: bool = False,
+           bounds: tuple[int | None, int | None] | None = None) -> ExtractedField:
     status = _status(raw.status, allow_not_applicable=True)
     value = raw.value
     evidence: list[EvidenceSpan] = []
     flags: list[str] = []
     if status == ValueStatus.FOUND and value is not None and not derived:
-        evidence, flags = _evidence(document, raw.start, raw.end, str(value))
+        evidence, flags = _evidence(document, raw.start, raw.end, str(value), bounds)
         if not evidence:
             status = ValueStatus.UNCERTAIN
     elif derived:
@@ -270,18 +291,26 @@ def _mentions(document: CanonicalDocument, raw_mentions: list[RawMention]) -> li
         if raw.identifier_type not in allowed_types:
             continue
         evidence, _ = _evidence(document, raw.start, raw.end, raw.text)
+        if not evidence and detector == "model":
+            for recovered_start, recovered_end in _exact_positions(document.text, raw.text):
+                recovered = raw.model_copy(update={"start": recovered_start,
+                                                   "end": recovered_end})
+                candidates.append((recovered, detector))
+            continue
         if not evidence:
             continue
         role = raw.person_role if raw.person_role in allowed_roles else "unknown"
-        key = (raw.start, raw.end, raw.identifier_type)
+        grounded = evidence[0]
+        key = (grounded.start, grounded.end, raw.identifier_type)
         mention = EntityMention(
-            mention_id=stable_id("mention", f"{document.document_id}:{raw.start}:{raw.end}:{raw.identifier_type}"),
+            mention_id=stable_id("mention", f"{document.document_id}:{grounded.start}:"
+                                 f"{grounded.end}:{raw.identifier_type}"),
             identifier_type=raw.identifier_type,
             person_role=role,
             text=raw.text,
             model_confidence=raw.model_confidence,
             detector=detector,
-            evidence=evidence[0],
+            evidence=grounded,
             grounded=True,
             local_entity_id=stable_id("local", f"{document.document_id}:{role}:{raw.text.casefold()}"),
         )
@@ -302,35 +331,43 @@ def _parse_cv(document: CanonicalDocument, raw: RawCV,
 
     education_items: list[EducationItem] = []
     for index, item in enumerate(sections.education.items):
+        bounds = (item.start, item.end)
         education_items.append(EducationItem(
             item_id=stable_id("education", f"{document.document_id}:{index}:{item.start}"),
-            degree_type=_field(document, item.degree_type), field=_field(document, item.field),
-            institution=_field(document, item.institution),
-            start_year=_field(document, item.start_year), end_year=_field(document, item.end_year),
-            graduation_year=_field(document, item.graduation_year),
+            degree_type=_field(document, item.degree_type, bounds=bounds),
+            field=_field(document, item.field, bounds=bounds),
+            institution=_field(document, item.institution, bounds=bounds),
+            start_year=_field(document, item.start_year, bounds=bounds),
+            end_year=_field(document, item.end_year, bounds=bounds),
+            graduation_year=_field(document, item.graduation_year, bounds=bounds),
             item_model_confidence=item.model_confidence,
             evidence=_item_evidence(document, item.start, item.end),
         ))
     employment_items: list[EmploymentItem] = []
     for index, item in enumerate(sections.employment.items):
+        bounds = (item.start, item.end)
         employment_items.append(EmploymentItem(
             item_id=stable_id("employment", f"{document.document_id}:{index}:{item.start}"),
-            organization=_field(document, item.organization),
-            original_title=_field(document, item.original_title),
+            organization=_field(document, item.organization, bounds=bounds),
+            original_title=_field(document, item.original_title, bounds=bounds),
             job_category=_field(document, item.job_category, derived=True),
             position_type=_field(document, item.position_type, derived=True),
-            start_date=_field(document, item.start_date), end_date=_field(document, item.end_date),
+            start_date=_field(document, item.start_date, bounds=bounds),
+            end_date=_field(document, item.end_date, bounds=bounds),
             item_model_confidence=item.model_confidence,
             evidence=_item_evidence(document, item.start, item.end),
         ))
     publication_items: list[PublicationItem] = []
     for index, item in enumerate(sections.publications.items):
+        bounds = (item.start, item.end)
         publication_items.append(PublicationItem(
             item_id=stable_id("publication", f"{document.document_id}:{index}:{item.start}"),
-            title=_field(document, item.title), doi=_field(document, item.doi),
+            title=_field(document, item.title, bounds=bounds),
+            doi=_field(document, item.doi, bounds=bounds),
             publication_type=_field(document, item.publication_type, derived=True),
-            year=_field(document, item.year), venue=_field(document, item.venue),
-            authors=[PublicationAuthor(name=_field(document, author.name),
+            year=_field(document, item.year, bounds=bounds),
+            venue=_field(document, item.venue, bounds=bounds),
+            authors=[PublicationAuthor(name=_field(document, author.name, bounds=bounds),
                                        author_position=author.author_position,
                                        is_applicant=author.is_applicant)
                      for author in item.authors],

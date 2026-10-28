@@ -55,14 +55,15 @@ candidate text
   -> bounded Qwen classification of ambiguous candidate IDs only
   -> code validation, policy adjudication, deduplication, overlap resolution
   -> zero or one deterministic replacement batch
-  -> deterministic residual scan
-  -> independent local NER coverage and bounded classification
+  -> substitution verification + deterministic identifier/protected-alias residual scan
   -> validated_candidate | review_required | withheld
 ```
 
 Qwen never discovers spans, supplies offsets, or rewrites prose during privacy validation. It can
-only classify source-grounded NER candidate IDs. Missing decisions become review items; confirmed
-residuals cause withholding. The model is never called recursively until it returns an empty list.
+only classify source-grounded ambiguous NER candidate IDs. Missing decisions become review items;
+confirmed deterministic or accepted-alias residuals cause withholding. NER is not rerun over the
+placeholder-modified result because that changes its contextual classifications rather than
+providing independent evidence. The model is never called recursively until it returns an empty list.
 Without an enabled local NER backend the result is `review_required`, not an automatic pass.
 
 Contextual re-identification is a different question from visible-span removal. V2 records a
