@@ -478,7 +478,7 @@ def test_privacy_generic_single_word_is_advisory_not_repaired() -> None:
     assert result.release_status == "validated_candidate"
     assert repaired.count("ordinary") == 2
     assert redactions == []
-    assert result.advisory_count == 2
+    assert result.advisory_count == 3
 
 
 def test_privacy_contextual_risk_requires_review_without_deleting_text() -> None:
@@ -510,7 +510,7 @@ def test_privacy_contextual_risk_requires_review_without_deleting_text() -> None
     assert result.reason_codes == ["contextual_reidentification_review"]
     assert repaired == text
     assert redactions == []
-    assert metrics["calls"] == 2
+    assert metrics["calls"] == 3
 
 
 def test_privacy_repeated_visible_value_is_repaired_in_one_batch() -> None:
@@ -543,7 +543,7 @@ def test_privacy_repeated_visible_value_is_repaired_in_one_batch() -> None:
     assert "Named Person" not in repaired
     assert len(redactions) == 2
     assert metrics["repairs"] == 1
-    assert metrics["calls"] == 2
+    assert metrics["calls"] == 3
 
 
 def test_privacy_confirmed_residual_is_withheld_when_repair_disabled() -> None:
@@ -576,3 +576,41 @@ def test_privacy_confirmed_residual_is_withheld_when_repair_disabled() -> None:
     assert result.confirmed_finding_count == 1
     assert repaired == text
     assert redactions == []
+
+
+def test_privacy_masked_coverage_pass_finds_second_distinct_identifier() -> None:
+    class Backend:
+        def complete(self, task, prompt, schema, max_tokens):
+            text = prompt.rsplit("CANDIDATE_TEXT:\n", 1)[-1]
+            value = None
+            if "Alpha Person" in text:
+                value = "Alpha Person"
+            elif "Beta Person" in text:
+                value = "Beta Person"
+            findings = ([{"identifier_type": "person_name", "text": value,
+                          "finding_kind": "visible_identifier", "line_number": 2,
+                          "model_confidence": 0.98}] if value else [])
+            return ModelResponse(payload={"safe": not findings, "model_confidence": 0.98,
+                                          "findings": findings}, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nAlpha Person worked with Beta Person."
+    document = CanonicalDocument(
+        application_id="application_x", document_id="document_x",
+        document_type=DocumentType.LETTER, source_sha256="0" * 64,
+        source_reference="document_x", text=text,
+        pages=[CanonicalPage(page=1, text=text.split("\n", 1)[1], document_start=11,
+                             document_end=len(text), extraction_method="native",
+                             extraction_status=ValueStatus.FOUND)],
+        extraction_status=ValueStatus.FOUND,
+    )
+    repaired, result, redactions, metrics = validate_privacy(
+        document, text, [], Backend(), 256, 1)
+    assert result.release_status == "validated_candidate"
+    assert "Alpha Person" not in repaired
+    assert "Beta Person" not in repaired
+    assert len(redactions) == 2
+    assert metrics["repairs"] == 1
+    assert metrics["calls"] == 3

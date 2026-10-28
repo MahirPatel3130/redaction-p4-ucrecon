@@ -281,11 +281,26 @@ def _detect(text: str, backend: InferenceBackend, max_tokens: int,
         line_map = {number: (start, end) for number, start, end, _ in chunk.lines}
         for row in review.findings:
             if row.finding_kind == "contextual_risk":
-                findings.append(PrivacyFinding(
-                    finding_type="contextual_reidentification_risk", detector="model",
-                    grounded=False, disposition="review_required",
-                    model_confidence=row.model_confidence,
-                ))
+                bounds = line_map.get(row.line_number)
+                ranges = (_ground_model_text(text, row.text, *bounds) if bounds else [])
+                if not ranges:
+                    ranges = _ground_model_text(text, row.text, chunk.start,
+                                                chunk.start + len(chunk.text))
+                ranges = [(start, end) for start, end in ranges
+                          if not _overlaps_placeholder(text, start, end)]
+                if ranges:
+                    for start, end in ranges:
+                        findings.append(PrivacyFinding(
+                            finding_type="contextual_reidentification_risk", start=start, end=end,
+                            detector="model", grounded=True, disposition="review_required",
+                            model_confidence=row.model_confidence,
+                        ))
+                else:
+                    findings.append(PrivacyFinding(
+                        finding_type="unsupported_contextual_advisory", detector="model",
+                        grounded=False, disposition="advisory",
+                        model_confidence=row.model_confidence,
+                    ))
                 continue
             if not _model_text_is_plausible(row.identifier_type, row.text):
                 findings.append(PrivacyFinding(
@@ -368,6 +383,16 @@ def _select_repairs(spans: list[RepairSpan]) -> list[RepairSpan]:
     return sorted(selected, key=lambda item: item.start)
 
 
+def _mask_spans_preserving_offsets(text: str, spans: list[RepairSpan]) -> str:
+    """Hide known candidates from a coverage pass without changing global offsets."""
+    characters = list(text)
+    for row in _select_repairs(spans):
+        for index in range(row.start, min(row.end, len(characters))):
+            if characters[index] not in {"\n", "\r"}:
+                characters[index] = " "
+    return "".join(characters)
+
+
 def _apply_repair_batch(document: CanonicalDocument, text: str, spans: list[RepairSpan],
                         redactions: list[dict[str, Any]]) -> tuple[str, int]:
     selected = _select_repairs(spans)
@@ -404,6 +429,10 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     repair_spans = _deterministic_repairs(deidentified_text) + _alias_repairs(
         deidentified_text, redactions)
     repair_spans.extend(row for row in model_spans if row.identifier_type in approved)
+    coverage_input = _mask_spans_preserving_offsets(deidentified_text, repair_spans)
+    coverage_spans, coverage_findings, coverage_metrics = _detect(
+        coverage_input, backend, max_tokens, "candidate_coverage", policy)
+    repair_spans.extend(row for row in coverage_spans if row.identifier_type in approved)
     repaired = deidentified_text
     repair_count = 0
     if repair_spans and maximum_repairs > 0:
@@ -417,7 +446,7 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                       if row.grounded and row.finding_type in approved]
     review_items = [row for row in final_model_findings
                     if row.disposition == "review_required"]
-    advisories = [row for row in first_findings + final_model_findings
+    advisories = [row for row in first_findings + coverage_findings + final_model_findings
                   if row.disposition == "advisory"]
 
     if deterministic_final or grounded_final:
@@ -433,7 +462,9 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         status = "validated_candidate"
         reasons = (["unsupported_model_advisory"] if advisories else [])
 
-    confidences = (first_metrics["model_confidences"] + final_metrics["model_confidences"])
+    confidences = (first_metrics["model_confidences"]
+                   + coverage_metrics["model_confidences"]
+                   + final_metrics["model_confidences"])
     model_confidence = min(confidences) if confidences else None
     final_findings = deterministic_final + grounded_final + review_items + advisories
     unique = {(row.finding_type, row.start, row.end, row.detector, row.disposition): row
@@ -446,16 +477,21 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         content_sha256=(sha256_bytes(repaired.encode("utf-8"))
                         if status == "validated_candidate" else None),
         advisory_count=len(advisories), confirmed_finding_count=(
-            len(deterministic_final) + len(grounded_final)), validation_passes=2,
+            len(deterministic_final) + len(grounded_final)), validation_passes=3,
     )
-    raw_responses = first_metrics["raw_responses"] + final_metrics["raw_responses"]
+    raw_responses = (first_metrics["raw_responses"] + coverage_metrics["raw_responses"]
+                     + final_metrics["raw_responses"])
     return repaired, result, redactions, {
-        "calls": first_metrics["calls"] + final_metrics["calls"],
+        "calls": (first_metrics["calls"] + coverage_metrics["calls"]
+                  + final_metrics["calls"]),
         "repairs": 1 if repair_count else 0,
         "repair_span_count": repair_count,
-        "input_tokens": first_metrics["input_tokens"] + final_metrics["input_tokens"],
-        "output_tokens": first_metrics["output_tokens"] + final_metrics["output_tokens"],
+        "input_tokens": (first_metrics["input_tokens"] + coverage_metrics["input_tokens"]
+                         + final_metrics["input_tokens"]),
+        "output_tokens": (first_metrics["output_tokens"] + coverage_metrics["output_tokens"]
+                          + final_metrics["output_tokens"]),
         "inference_seconds": (first_metrics["inference_seconds"]
+                              + coverage_metrics["inference_seconds"]
                               + final_metrics["inference_seconds"]),
         "candidate_content_sha256": candidate_hash,
         "final_content_sha256": sha256_bytes(repaired.encode("utf-8")),

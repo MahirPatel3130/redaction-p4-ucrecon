@@ -8,8 +8,10 @@ The source PDF is processed once into protected canonical text. Native PyMuPDF e
 when reliable; PaddleOCR handles deficient pages. All later model extraction, identity resolution,
 de-identification, finite privacy validation, and export reuse the cached canonical representation.
 
-Privacy validation is evidence-grounded and terminating. Qwen performs two detection-only passes
-around at most one deterministic replacement batch. Model offsets are never trusted, unsupported
+Privacy validation is evidence-grounded and terminating. Qwen performs two bounded discovery
+passes over the same candidate, followed by at most one deterministic replacement batch and one
+independent final review. The coverage pass masks already discovered spans without changing source
+offsets. Model offsets are never trusted, unsupported
 model claims cannot delete text, and repeated generative repair is prohibited. The terminal states
 are `validated_candidate`, `review_required`, and `withheld`. Only `validated_candidate` documents
 enter the candidate researcher package; they still require the configured stratified human review

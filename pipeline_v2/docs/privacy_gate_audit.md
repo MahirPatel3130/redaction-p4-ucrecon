@@ -29,20 +29,23 @@ checks or assuming that a larger model alone would fix the stopping condition.
 1. The model proposes candidate evidence; it is not the release authority.
 2. Model character offsets are forbidden. Code grounds exact visible text to numbered source lines.
 3. Valid placeholders are structurally masked and cannot become findings.
-4. Only grounded, policy-approved spans can be replaced automatically.
-5. All accepted spans are deduplicated and replaced in one right-to-left batch.
-6. Unsupported model claims are retained as protected advisories and never delete text.
-7. Contextual risks, capacity saturation, and inconsistent unsafe-without-evidence responses enter
+4. Two bounded discovery passes inspect the same candidate. The second masks already discovered
+   spans while preserving offsets so the model can find remaining visible candidates.
+5. Only grounded, policy-approved spans can be replaced automatically.
+6. All accepted spans are deduplicated and replaced in one right-to-left batch.
+7. Unsupported model claims are retained as protected advisories and never delete text.
+8. Contextual claims require grounded visible evidence; unsupported contextual claims are advisory.
+   Grounded contextual risks, capacity saturation, and inconsistent unsafe-without-evidence responses enter
    `review_required`.
-8. Confirmed residual direct identifiers or protected aliases enter `withheld`.
-9. A clean final deterministic scan plus independent detection-only review produces
+9. Confirmed residual direct identifiers or protected aliases enter `withheld`.
+10. A clean final deterministic scan plus independent detection-only review produces
    `validated_candidate`; sampled human approval is still required for final export.
-10. Candidate and final content hashes, model-call counts, token counts, findings, and repair counts
+11. Candidate and final content hashes, model-call counts, token counts, findings, and repair counts
     remain available in protected metrics without logging P4 values.
 
 ## Performance boundary
 
-The number of privacy calls is exactly two per text chunk: candidate detection and independent final
-review. There is at most one repair batch. Long documents are split into non-overlapping numbered
+The number of privacy calls is exactly three per text chunk: discovery, masked coverage, and
+independent final review. There is at most one repair batch. Long documents are split into non-overlapping numbered
 line chunks; findings are grounded to document-global offsets and deduplicated. This makes runtime
 and destructive transformations bounded independently of model behavior.

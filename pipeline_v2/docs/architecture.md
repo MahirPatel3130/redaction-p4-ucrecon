@@ -50,6 +50,7 @@ The privacy gate has a fixed state machine:
 candidate text
   -> deterministic direct-identifier and protected-alias scan
   -> chunked Qwen candidate detection (exact visible text + numbered line)
+  -> coverage detection on the same candidate with known spans masked
   -> code grounding, policy adjudication, deduplication, overlap resolution
   -> zero or one deterministic replacement batch
   -> deterministic residual scan
