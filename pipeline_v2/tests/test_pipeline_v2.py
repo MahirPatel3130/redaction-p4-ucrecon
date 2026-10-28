@@ -380,7 +380,8 @@ def test_ner_candidate_is_classified_and_repaired_once() -> None:
     assert "Secret Alias" not in repaired
     assert len(redactions) == 2
     assert metrics["repairs"] == 1
-    assert metrics["calls"] == 1
+    assert metrics["calls"] == 0
+    assert metrics["ner_auto_accepted_count"] == 2
 
 
 def test_classified_ner_value_expands_to_unseen_repeated_occurrence() -> None:
@@ -398,12 +399,38 @@ def test_classified_ner_value_expands_to_unseen_repeated_occurrence() -> None:
     assert len(redactions) == 2
 
 
+def test_masked_context_scan_is_unioned_before_single_repair_batch() -> None:
+    class ContextSensitiveNER:
+        name = "context_sensitive"
+
+        def detect(self, text: str):
+            if "writer@example.edu" in text:
+                return []
+            value = "Secret Writer"
+            start = text.find(value)
+            return ([NERSpan(start, start + len(value), value, "person_name",
+                             "PERSON", None, self.name)] if start >= 0 else [])
+
+        def close(self):
+            return None
+
+    text = "[[PAGE:1]]\nSecret Writer writer@example.edu"
+    repaired, result, redactions, metrics = validate_privacy(
+        privacy_document(text), text, [], CandidateBackend(), 256, 1, None,
+        ContextSensitiveNER(), 40)
+    assert result.release_status == "validated_candidate"
+    assert "Secret Writer" not in repaired
+    assert "writer@example.edu" not in repaired
+    assert metrics["repairs"] == 1
+    assert len(redactions) == 2
+
+
 def test_ner_candidate_can_be_preserved_without_redaction() -> None:
-    text = "[[PAGE:1]]\nBayesian Inference is a generic method."
+    text = "[[PAGE:1]]\nRiverside is a location, not a postal address."
     repaired, result, redactions, metrics = validate_privacy(
         privacy_document(text), text, [],
-        CandidateBackend({"Bayesian Inference": "preserve"}), 256, 1, None,
-        PatternNER({"Bayesian Inference": "work_title"}), 40)
+        CandidateBackend({"Riverside": "preserve"}), 256, 1, None,
+        PatternNER({"Riverside": "location"}), 40)
     assert result.release_status == "validated_candidate"
     assert repaired == text
     assert redactions == []
@@ -411,10 +438,10 @@ def test_ner_candidate_can_be_preserved_without_redaction() -> None:
 
 
 def test_ambiguous_ner_candidate_requires_review() -> None:
-    text = "[[PAGE:1]]\nNature may be a venue or an ordinary word."
+    text = "[[PAGE:1]]\nRiverside may be a location or part of an address."
     repaired, result, redactions, _ = validate_privacy(
-        privacy_document(text), text, [], CandidateBackend({"Nature": "review"}), 256, 1,
-        None, PatternNER({"Nature": "organization"}), 40)
+        privacy_document(text), text, [], CandidateBackend({"Riverside": "review"}), 256, 1,
+        None, PatternNER({"Riverside": "location"}), 40)
     assert result.release_status == "review_required"
     assert result.reason_codes == ["ambiguous_ner_candidate_review"]
     assert repaired == text

@@ -283,10 +283,24 @@ def _classify_ner_candidates(document: CanonicalDocument, text: str, rows: list[
     findings: list[PrivacyFinding] = []
     metrics: dict[str, Any] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
                                "inference_seconds": 0.0, "raw_responses": [],
-                               "model_confidences": [], "preserved": 0}
+                               "model_confidences": [], "preserved": 0,
+                               "auto_accepted": 0}
     candidates: list[dict[str, Any]] = []
     row_by_id: dict[str, NERSpan] = {}
     for row in _valid_ner_spans(text, rows):
+        if row.identifier_type in {"person_name", "organization", "work_title"}:
+            if row.identifier_type in approved:
+                accepted.append(RepairSpan(
+                    row.start, row.end, row.identifier_type, "ner", row.score))
+                findings.append(PrivacyFinding(
+                    finding_type=row.identifier_type, start=row.start, end=row.end,
+                    detector="model", grounded=True, disposition="confirmed",
+                    model_confidence=row.score,
+                ))
+                metrics["auto_accepted"] += 1
+            else:
+                metrics["preserved"] += 1
+            continue
         candidate_id = stable_id(
             "candidate", f"{document.document_id}:{row.start}:{row.end}:{row.identifier_type}")
         row_by_id[candidate_id] = row
@@ -364,9 +378,14 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     authoritative = _deterministic_repairs(deidentified_text) + _alias_repairs(
         deidentified_text, redactions)
     ner_input = _mask_spans_preserving_offsets(deidentified_text, authoritative)
-    ner_rows = ner_backend.detect(ner_input)
+    # Full-context and authoritative-masked scans are complementary. Union them before
+    # replacement so the final validator is not the first stage to see an adjacent entity.
+    full_context_rows = ner_backend.detect(deidentified_text)
+    masked_context_rows = ner_backend.detect(ner_input)
+    ner_rows = list({(row.start, row.end, row.identifier_type): row
+                     for row in full_context_rows + masked_context_rows}.values())
     ner_repairs, _, first_metrics = _classify_ner_candidates(
-        document, ner_input, ner_rows, backend, max_tokens, ner_candidates_per_call,
+        document, deidentified_text, ner_rows, backend, max_tokens, ner_candidates_per_call,
         approved, "candidate_classification")
     ner_repairs = _expand_classified_repairs(deidentified_text, ner_repairs)
     repair_spans = authoritative + ner_repairs
@@ -434,6 +453,8 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         "ner_candidate_count": len(ner_rows),
         "ner_final_candidate_count": len(final_ner_rows),
         "ner_preserved_count": first_metrics["preserved"] + final_metrics["preserved"],
+        "ner_auto_accepted_count": (first_metrics["auto_accepted"]
+                                    + final_metrics["auto_accepted"]),
         "confirmed_residual_count": len(deterministic_final) + len(grounded_final),
         "_raw_responses": raw_responses,
     }

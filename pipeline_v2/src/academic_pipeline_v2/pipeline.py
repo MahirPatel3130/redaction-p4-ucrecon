@@ -151,9 +151,25 @@ def _semantic_fingerprint(config: PipelineConfig, canonical: CanonicalDocument) 
 def _privacy_fingerprint(config: PipelineConfig, semantic_fp: str,
                          resolved: dict[str, Any]) -> str:
     policy = yaml.safe_load(config.privacy.policy_path.read_text(encoding="utf-8"))
-    return stage_fingerprint("privacy_v3_structured_ner_1", semantic_fp, config.model.model,
+    return stage_fingerprint("privacy_v3_structured_ner_2", semantic_fp, config.model.model,
                              fingerprint(policy), config.ner.model_dump(mode="json"),
                              resolved.get("mention_map", {}))
+
+
+def _structured_mention_count(extraction: CVExtraction | LetterExtraction | None) -> int:
+    """Count CV privacy fields even when a compatible cached artifact predates provenance labels."""
+    if not isinstance(extraction, CVExtraction):
+        return 0
+    fields = []
+    for item in extraction.education.items:
+        fields.append(item.institution)
+    for item in extraction.employment.items:
+        fields.extend((item.organization, item.original_title))
+    for item in extraction.publications.items:
+        fields.extend((item.title, item.doi, item.venue))
+        fields.extend(author.name for author in item.authors)
+    return len({(field.evidence[0].start, field.evidence[0].end)
+                for field in fields if field.value is not None and field.evidence})
 
 
 def _load_canonicals(config: PipelineConfig, documents: list[DocumentRecord]) -> dict[str, CanonicalDocument]:
@@ -365,13 +381,12 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                                   + privacy_row.get("output_tokens", 0)),
                 "model_calls": semantic_row.get("calls", 0) + privacy_row.get("calls", 0),
                 "repair_count": semantic_row.get("repairs", 0) + privacy_row.get("repairs", 0),
-                "structured_mention_count": sum(
-                    mention.detector == "structured" for mention in
-                    (row["extraction"].mentions if row.get("extraction") else [])),
+                "structured_mention_count": _structured_mention_count(row.get("extraction")),
                 "ner_backend": privacy_row.get("ner_backend", "none"),
                 "ner_candidate_count": privacy_row.get("ner_candidate_count", 0),
                 "ner_final_candidate_count": privacy_row.get("ner_final_candidate_count", 0),
                 "ner_preserved_count": privacy_row.get("ner_preserved_count", 0),
+                "ner_auto_accepted_count": privacy_row.get("ner_auto_accepted_count", 0),
                 "status": row["processing_status"], "release_status": row["privacy"].release_status,
                 "failure_code": row.get("failure_code"),
             })
@@ -436,6 +451,8 @@ def summarize(processed: list[dict[str, Any]], timings: list[dict[str, Any]]) ->
         "ner_final_candidate_count": sum(
             int(row.get("ner_final_candidate_count", 0)) for row in timings),
         "ner_preserved_count": sum(int(row.get("ner_preserved_count", 0)) for row in timings),
+        "ner_auto_accepted_count": sum(
+            int(row.get("ner_auto_accepted_count", 0)) for row in timings),
         "peak_gpu_vram_bytes": None,
         "peak_gpu_vram_note": "Collect from the colocated vLLM server metrics on the restricted host",
     }

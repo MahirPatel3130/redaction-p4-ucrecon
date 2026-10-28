@@ -11,8 +11,10 @@ the model was simultaneously proposing evidence, classifying policy, and decidin
 
 1. Grounded CV structured fields and grounded letter entity extraction.
 2. Deterministic direct-identifier patterns and exact protected aliases.
-3. A separately loaded offline NER model that proposes exact source spans.
-4. Qwen classification of supplied candidate IDs only: `replace`, `preserve`, or `review`.
+3. A separately loaded offline NER model that proposes exact source spans. Strong PERSON, ORG, and
+   WORK labels covered by policy are accepted directly.
+4. Qwen classification of ambiguous supplied candidate IDs only: `replace`, `preserve`, or
+   `review`.
 5. Deterministic overlap resolution and one right-to-left replacement batch.
 6. A final deterministic and NER coverage pass over the resulting text.
 

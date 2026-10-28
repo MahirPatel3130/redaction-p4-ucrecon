@@ -51,7 +51,8 @@ The privacy gate has a fixed state machine:
 candidate text
   -> grounded semantic fields + deterministic identifiers + protected aliases
   -> local offline NER candidate generation with exact offsets
-  -> bounded Qwen classification of candidate IDs only
+  -> direct policy handling for strong PERSON/ORG/WORK labels
+  -> bounded Qwen classification of ambiguous candidate IDs only
   -> code validation, policy adjudication, deduplication, overlap resolution
   -> zero or one deterministic replacement batch
   -> deterministic residual scan

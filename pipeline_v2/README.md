@@ -10,9 +10,11 @@ de-identification, finite privacy validation, and export reuse the cached canoni
 
 Privacy validation is evidence-grounded and terminating. Grounded structured fields, deterministic
 patterns, and protected aliases are authoritative. A local offline NER model proposes additional
-source spans; Qwen only classifies those bounded candidates as `replace`, `preserve`, or `review`.
-It cannot invent text or offsets. Code performs at most one replacement batch and then repeats the
-independent NER coverage check. Contextual re-identification is assessed separately at application
+source spans. Policy-prohibited PERSON, ORG, and WORK labels are accepted as grounded NER evidence;
+Qwen only classifies ambiguous candidates such as locations that may or may not be postal addresses.
+It cannot invent text or offsets. Code unions full-context and masked-context NER scans, performs at
+most one replacement batch, and then repeats the independent NER coverage check. Contextual
+re-identification is assessed separately at application
 level and never drives character-span deletion. The terminal states
 are `validated_candidate`, `review_required`, and `withheld`. Only `validated_candidate` documents
 enter the candidate researcher package; they still require the configured stratified human review
