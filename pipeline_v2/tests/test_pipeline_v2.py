@@ -99,6 +99,8 @@ def test_semantic_confidence_is_required_and_never_invented() -> None:
                  start=0, end=9)
     failed = RawField(value=None, status="model_failed", model_confidence=None)
     assert failed.model_confidence is None
+    with pytest.raises(ValidationError):
+        RawField(value="Economics", status="complete", model_confidence=0.9)
 
 
 def test_semantic_validation_repair_reports_safe_locations_and_retries() -> None:

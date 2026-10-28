@@ -36,7 +36,7 @@ def _validate_status_confidence(value: Any) -> Any:
 
 class RawField(RawModel):
     value: str | int | float | bool | None
-    status: str
+    status: Literal["found", "not_found", "uncertain", "model_failed", "not_applicable"]
     model_confidence: float | None = Field(ge=0, le=1)
     start: int | None = None
     end: int | None = None
@@ -47,6 +47,8 @@ class RawField(RawModel):
             raise ValueError("model_failed confidence must be null")
         if self.status != "model_failed" and self.model_confidence is None:
             raise ValueError("semantic confidence is required")
+        if self.status == "found" and self.value is None:
+            raise ValueError("found field requires a value")
         return self
 
 
@@ -76,7 +78,7 @@ class RawEmployment(RawModel):
 
 class RawAuthor(RawModel):
     name: RawField
-    author_position: int | None = None
+    author_position: int | None = Field(default=None, ge=1)
     is_applicant: bool | None = None
 
 
@@ -93,7 +95,7 @@ class RawPublication(RawModel):
 
 
 class RawEducationSection(RawModel):
-    status: str
+    status: Literal["found", "not_found", "uncertain", "model_failed"]
     model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawEducation] = Field(default_factory=list)
@@ -104,7 +106,7 @@ class RawEducationSection(RawModel):
 
 
 class RawEmploymentSection(RawModel):
-    status: str
+    status: Literal["found", "not_found", "uncertain", "model_failed"]
     model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawEmployment] = Field(default_factory=list)
@@ -115,7 +117,7 @@ class RawEmploymentSection(RawModel):
 
 
 class RawPublicationSection(RawModel):
-    status: str
+    status: Literal["found", "not_found", "uncertain", "model_failed"]
     model_confidence: float | None = Field(ge=0, le=1)
     not_found_reason: str | None = None
     items: list[RawPublication] = Field(default_factory=list)
@@ -161,7 +163,7 @@ class RawRelationship(RawModel):
 
 
 class RawLetter(RawModel):
-    status: str
+    status: Literal["found", "not_found", "uncertain", "model_failed"]
     model_confidence: float | None = Field(ge=0, le=1)
     mentions: list[RawMention] = Field(default_factory=list)
     relationships: list[RawRelationship] = Field(default_factory=list)
