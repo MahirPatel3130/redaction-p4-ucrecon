@@ -472,14 +472,14 @@ def validate_candidate_package(output_root: Path) -> dict[str, Any]:
     protected_redactions = output_root / "protected" / "redactions.jsonl"
     if not candidate.is_dir() or not (candidate / "manifest.json").exists():
         raise ReleaseError("candidate_package_missing")
-    aliases: list[str] = []
+    redactions: list[dict[str, Any]] = []
     if protected_redactions.exists():
         for line in protected_redactions.read_text(encoding="utf-8").splitlines():
             if line.strip():
-                value = json.loads(line).get("text")
-                if isinstance(value, str):
-                    aliases.append(value)
-    leaks = _package_leaks(candidate, aliases)
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    redactions.append(row)
+    leaks = _package_leaks(candidate, redactions)
     if leaks:
         raise ReleaseError("candidate_package_privacy_validation_failed")
     manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))

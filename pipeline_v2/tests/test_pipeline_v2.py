@@ -169,6 +169,34 @@ def test_package_alias_scan_is_document_local(tmp_path: Path) -> None:
     assert _package_leaks(package, same_document) == ["protected_alias_in_letter_text"]
 
 
+def test_independent_candidate_validation_preserves_redaction_document_scope(
+        tmp_path: Path) -> None:
+    candidate = tmp_path / "researcher_candidate"
+    protected = tmp_path / "protected"
+    candidate.mkdir(); protected.mkdir()
+    (candidate / "recommendation_letters.jsonl").write_text(
+        '{"document_id":"document_aaaaaaaa","text":"Economics is relevant."}\n',
+        encoding="utf-8",
+    )
+    (candidate / "entities.csv").write_text(
+        "entity_id,entity_type,document_count,application_count\n",
+        encoding="utf-8",
+    )
+    (candidate / "relationships.csv").write_text(
+        "relationship_id,relationship_type,source_id,target_id,application_id,"
+        "document_id,confidence,validation_status\n",
+        encoding="utf-8",
+    )
+    files = {path.name: sha256_file(path) for path in candidate.iterdir()}
+    (candidate / "manifest.json").write_text(
+        json.dumps({"files": files}), encoding="utf-8")
+    (protected / "redactions.jsonl").write_text(
+        '{"document_id":"document_bbbbbbbb","text":"Economics"}\n',
+        encoding="utf-8",
+    )
+    assert validate_candidate_package(tmp_path)["status"] == "valid"
+
+
 class FakeOCR:
     def extract(self, page: object, dpi: int):
         return [("Scanned Applicant Alice", (10.0, 10.0, 200.0, 30.0), 0.99)]
