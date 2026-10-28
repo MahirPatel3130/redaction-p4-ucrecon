@@ -137,6 +137,40 @@ def _overlaps_placeholder(text: str, start: int, end: int) -> bool:
                for match in re.finditer(r"\[\[[^\]]+\]\]", text))
 
 
+def _model_text_is_plausible(identifier_type: str, value: str) -> bool:
+    value = value.strip()
+    if len(value) < 3:
+        return False
+    folded = value.casefold()
+    if identifier_type == "organization" and folded in {
+        "university", "college", "school", "department", "institute", "institution",
+        "organization", "committee",
+    }:
+        return False
+    if identifier_type == "person_name" and folded in {
+        "applicant", "candidate", "recommender", "professor", "doctor", "chair",
+        "he", "she", "they", "him", "her", "them",
+    }:
+        return False
+    if identifier_type == "work_title" and len(value.split()) < 2:
+        return False
+    return True
+
+
+def _ground_model_text(text: str, value: str) -> list[tuple[int, int]]:
+    """Map model-returned text to every deterministic source occurrence."""
+    value = value.strip()
+    if not value:
+        return []
+    patterns = [re.escape(value)]
+    tokens = value.split()
+    if len(tokens) > 1:
+        patterns.append(r"\s+".join(re.escape(token) for token in tokens))
+    matches = [(match.start(), match.end()) for pattern in patterns
+               for match in re.finditer(pattern, text, flags=re.IGNORECASE)]
+    return sorted(set(matches))
+
+
 def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                      redactions: list[dict[str, Any]], backend: InferenceBackend,
                      max_tokens: int, maximum_repairs: int) -> tuple[str, PrivacyResult,
@@ -152,7 +186,6 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
     inference_seconds = 0.0
     model_confidence: float | None = None
     raw_responses: list[dict[str, Any]] = []
-    ungrounded_model_findings: list[PrivacyFinding] = []
     while repairs <= maximum_repairs:
         deterministic_findings = _scan(current, aliases)
         prompt = PRIVACY_PROMPT.format(text=current)
@@ -176,30 +209,29 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
         raw_responses.append(response.payload)
         model_confidence = review.model_confidence
         model_findings: list[PrivacyFinding] = []
+        ungrounded_model_findings: list[PrivacyFinding] = []
         valid_spans: list[tuple[int, int, str]] = [
             (row.start, row.end, row.finding_type)
             for row in deterministic_findings if row.start is not None and row.end is not None
         ]
         for row in review.findings:
-            grounded_start: int | None = None
-            grounded_end: int | None = None
+            grounded_ranges: list[tuple[int, int]] = []
             valid_range = 0 <= row.start < row.end <= len(current)
             if valid_range and current[row.start:row.end] == row.text:
-                grounded_start, grounded_end = row.start, row.end
-            else:
-                matches = [match.start() for match in re.finditer(re.escape(row.text), current)]
-                if len(matches) == 1:
-                    grounded_start = matches[0]
-                    grounded_end = grounded_start + len(row.text)
-            if (grounded_start is not None and grounded_end is not None
-                    and _overlaps_placeholder(current, grounded_start, grounded_end)):
+                grounded_ranges = [(row.start, row.end)]
+            elif _model_text_is_plausible(row.identifier_type, row.text):
+                grounded_ranges = _ground_model_text(current, row.text)
+            grounded_ranges = [(start, end) for start, end in grounded_ranges
+                               if not _overlaps_placeholder(current, start, end)]
+            if grounded_ranges:
+                for grounded_start, grounded_end in grounded_ranges:
+                    model_findings.append(PrivacyFinding(
+                        finding_type=row.identifier_type, start=grounded_start, end=grounded_end,
+                        detector="model", grounded=True,
+                    ))
+                    valid_spans.append((grounded_start, grounded_end, row.identifier_type))
+            elif valid_range and _overlaps_placeholder(current, row.start, row.end):
                 continue
-            if grounded_start is not None and grounded_end is not None:
-                model_findings.append(PrivacyFinding(
-                    finding_type=row.identifier_type, start=grounded_start, end=grounded_end,
-                    detector="model", grounded=True,
-                ))
-                valid_spans.append((grounded_start, grounded_end, row.identifier_type))
             else:
                 ungrounded_model_findings.append(PrivacyFinding(
                     finding_type="ungrounded_model_finding",
@@ -208,7 +240,7 @@ def validate_privacy(document: CanonicalDocument, deidentified_text: str,
                     detector="model", grounded=False,
                 ))
         findings = deterministic_findings + model_findings + ungrounded_model_findings
-        if ungrounded_model_findings:
+        if ungrounded_model_findings and not valid_spans:
             break
         if not findings and review.safe:
             break

@@ -17,7 +17,9 @@ from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
 from academic_pipeline_v2.models import DocumentRecord, DocumentType
 from academic_pipeline_v2.models import CanonicalDocument, CanonicalPage, ModelResponse, ValueStatus
-from academic_pipeline_v2.privacy import RawPrivacyReview, _scan, validate_privacy
+from academic_pipeline_v2.privacy import (
+    RawPrivacyReview, _ground_model_text, _scan, validate_privacy,
+)
 from academic_pipeline_v2.pipeline import (
     export_candidate_stage, finalize_review_stage, inventory_stage, process_stage, release_stage,
 )
@@ -425,6 +427,13 @@ def test_privacy_review_recovers_unique_exact_text() -> None:
     assert result.release_status == "released"
     assert "Unique Person" not in repaired
     assert len(redactions) == 1
+
+
+def test_privacy_grounding_maps_all_exact_and_whitespace_occurrences() -> None:
+    text = "Named Person appears. Named\nPerson appears again. named person."
+    assert _ground_model_text(text, "Named Person") == [
+        (0, 12), (22, 34), (50, 62),
+    ]
 
 
 def test_alias_scan_reports_every_repeated_occurrence() -> None:
