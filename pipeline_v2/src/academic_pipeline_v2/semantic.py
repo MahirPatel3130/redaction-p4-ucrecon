@@ -227,6 +227,28 @@ def _merge_raw_cv(chunks: list[RawCV]) -> RawCV:
     )
 
 
+def _merge_raw_letters(chunks: list[RawLetter]) -> RawLetter:
+    """Merge letter chunks without manufacturing a status/confidence combination."""
+    if any(row.status == "found" for row in chunks):
+        status = "found"
+    elif any(row.status == "uncertain" for row in chunks):
+        status = "uncertain"
+    elif any(row.status == "not_found" for row in chunks):
+        status = "not_found"
+    else:
+        status = "model_failed"
+    confidence = next((row.model_confidence for row in chunks
+                       if row.model_confidence is not None), None)
+    if status == "model_failed":
+        confidence = None
+    return RawLetter(
+        status=status,
+        model_confidence=confidence,
+        mentions=[item for row in chunks for item in row.mentions],
+        relationships=[item for row in chunks for item in row.relationships],
+    )
+
+
 def _validated_completion(backend: InferenceBackend, task: str, prompt: str,
                           contract: type[RawModel], max_tokens: int) -> tuple[RawModel, list[Any]]:
     responses = []
@@ -554,13 +576,7 @@ def extract_letter(document: CanonicalDocument, backend: InferenceBackend,
             backend, "letter", LETTER_PROMPT.format(text=chunk), RawLetter, max_tokens)
         responses.extend(attempts)
         raw_chunks.append(RawLetter.model_validate(_shift_offsets(validated.model_dump(), offset)))
-    raw = RawLetter(
-        status="found" if any(row.status == "found" for row in raw_chunks) else "uncertain",
-        model_confidence=next((row.model_confidence for row in raw_chunks
-                               if row.model_confidence is not None), None),
-        mentions=[item for row in raw_chunks for item in row.mentions],
-        relationships=[item for row in raw_chunks for item in row.relationships],
-    )
+    raw = _merge_raw_letters(raw_chunks)
     mentions = _mentions(document, raw.mentions)
     mention_by_start = {mention.evidence.start: mention for mention in mentions}
     relationships: list[ProposedRelationship] = []

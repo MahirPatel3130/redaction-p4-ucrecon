@@ -26,7 +26,8 @@ from academic_pipeline_v2.pipeline import (
 from academic_pipeline_v2.registry import EntityRegistry
 from academic_pipeline_v2.inference import VLLMBackend
 from academic_pipeline_v2.semantic import (
-    RawField, RawLetter, RawMention, _field, _mentions, _validated_completion,
+    RawField, RawLetter, RawMention, _field, _mentions, _merge_raw_letters,
+    _validated_completion,
 )
 from academic_pipeline_v2.util import sha256_file
 
@@ -126,6 +127,20 @@ def test_semantic_validation_repair_reports_safe_locations_and_retries() -> None
     assert len(responses) == 3
     assert "model_confidence" in backend.prompts[1]
     assert "SOURCE" in backend.prompts[2]
+
+
+def test_letter_chunk_merge_preserves_model_failed_status() -> None:
+    failed = RawLetter(status="model_failed", model_confidence=None,
+                       mentions=[], relationships=[])
+    merged = _merge_raw_letters([failed])
+    assert merged.status == "model_failed"
+    assert merged.model_confidence is None
+
+    not_found = RawLetter(status="not_found", model_confidence=0.93,
+                          mentions=[], relationships=[])
+    merged = _merge_raw_letters([not_found])
+    assert merged.status == "not_found"
+    assert merged.model_confidence == 0.93
 
 
 def test_package_leak_scan_uses_token_boundaries_and_masks_opaque_ids(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from . import PIPELINE_VERSION, PROMPT_VERSION, SCHEMA_VERSION
 from .checkpoints import CheckpointStore, stage_fingerprint
@@ -242,6 +243,15 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
             return record.document_id, result, model_metrics
         except Exception as exc:
             code = _safe_failure_code(exc)
+            if isinstance(exc, ValidationError):
+                safe_issues = [{"location": [str(part) for part in row["loc"]],
+                                "type": row["type"]}
+                               for row in exc.errors(include_url=False, include_context=False,
+                                                     include_input=False)]
+                checkpoint.metrics["semantic_validation_issues"] = safe_issues
+                LOG.error("Semantic conversion validation failed document_id=%s issues=%s",
+                          record.document_id,
+                          json.dumps(safe_issues, separators=(",", ":")))
             store.fail(checkpoint, "semantic", code)
             LOG.error("Semantic extraction failed document_id=%s error=%s code=%s",
                       record.document_id, type(exc).__name__, code)
