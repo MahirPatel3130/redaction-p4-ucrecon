@@ -226,6 +226,8 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
                 result, model_metrics = extract_letter(canonical, backend,
                                                        config.model.letter_max_tokens,
                                                        config.model.context_length)
+                if result.extraction_status.value == "model_failed":
+                    raise InferenceError("semantic_model_failed")
             raw_responses = model_metrics.pop("_raw_responses", [])
             if config.model.store_raw_responses:
                 atomic_json(protected / "model_responses" /

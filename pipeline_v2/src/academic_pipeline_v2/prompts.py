@@ -26,7 +26,10 @@ LETTER_PROMPT = """TASK=letter_extraction
 Identify every applicant, recommender, recipient, third party, organization, work title, contact
 identifier, address, URL, unique ID, and signature in this recommendation letter. Return exact
 character spans and roles. Identify supported writer-to-applicant relationships. Do not summarize
-or rewrite the letter.
+or rewrite the letter. Set status=found whenever the supplied source text is readable and you can
+complete the analysis, including when no relationship is present. Use status=not_found only when
+the readable text is not a recommendation letter. Use status=model_failed only when the source
+cannot be processed, and then use model_confidence=null.
 
 SOURCE_TEXT:
 {text}
