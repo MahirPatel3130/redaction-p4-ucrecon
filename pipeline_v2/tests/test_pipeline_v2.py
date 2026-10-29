@@ -12,23 +12,32 @@ from pydantic import ValidationError
 
 from academic_pipeline_v2.audit import build_privacy_audit
 from academic_pipeline_v2.config import ModelConfig, NERConfig, PipelineConfig
-from academic_pipeline_v2.exporter import _alias_present, _package_leaks, validate_candidate_package
+from academic_pipeline_v2.exporter import (
+    _alias_present, _package_leaks, public_controlled_field, validate_candidate_package,
+)
 from academic_pipeline_v2.evaluation import evaluate_run
 from academic_pipeline_v2.extraction import extract_canonical
 from academic_pipeline_v2.inventory import build_inventory
 from academic_pipeline_v2.models import DocumentRecord, DocumentType
-from academic_pipeline_v2.models import CanonicalDocument, CanonicalPage, ModelResponse, ValueStatus
+from academic_pipeline_v2.models import (
+    CanonicalDocument, CanonicalPage, ExtractedField, ModelResponse, PrivacyFinding,
+    PrivacyResult, ValueStatus,
+)
 from academic_pipeline_v2.ner import NERSpan
 from academic_pipeline_v2.privacy import RawCandidateReview, _scan, validate_privacy
 from academic_pipeline_v2.pipeline import (
-    export_candidate_stage, finalize_review_stage, inventory_stage, process_stage, release_stage,
+    apply_ner_review_stage, export_candidate_stage, finalize_review_stage, inventory_stage,
+    process_stage, release_stage,
 )
+from academic_pipeline_v2.checkpoints import CheckpointStore
 from academic_pipeline_v2.registry import EntityRegistry
 from academic_pipeline_v2.inference import VLLMBackend
 from academic_pipeline_v2.semantic import (
     RawField, RawLetter, RawMention, _field, _mentions, _merge_raw_letters,
-    _validated_completion,
+    _validated_completion, extract_cv,
 )
+from academic_pipeline_v2.errors import InferenceError
+from academic_pipeline_v2.inference import MockBackend
 from academic_pipeline_v2.util import sha256_file
 
 
@@ -219,7 +228,9 @@ class FakeOCR:
 
 def test_selective_ocr_contract(tmp_path: Path) -> None:
     pdf = tmp_path / "scan.pdf"
-    document = pymupdf.open(); document.new_page(); document.save(pdf); document.close()
+    document = pymupdf.open(); page = document.new_page()
+    page.draw_rect(pymupdf.Rect(20, 20, 400, 700), color=(0, 0, 0))
+    document.save(pdf); document.close()
     record = DocumentRecord(application_id="application_x", document_id="document_x",
                             document_type=DocumentType.LETTER, letter_index=1,
                             source_path=str(pdf), source_relative_path="app/scan.pdf",
@@ -236,6 +247,130 @@ def test_selective_ocr_contract(tmp_path: Path) -> None:
     low = extract_canonical(record, config, LowConfidenceOCR())
     assert low.extraction_status == ValueStatus.MODEL_FAILED
     assert "ocr_below_confidence" in low.pages[0].quality_flags
+
+
+def test_failed_page_ocr_recovery_preserves_native_and_blank_pages(tmp_path: Path) -> None:
+    pdf = tmp_path / "mixed.pdf"
+    document = pymupdf.open()
+    native = document.new_page()
+    native.insert_text((50, 50), "Native text remains available " * 4)
+    scan = document.new_page()
+    scan.draw_rect(pymupdf.Rect(20, 20, 400, 700), color=(0, 0, 0))
+    document.new_page()  # truly blank, not an extraction failure
+    document.save(pdf); document.close()
+    record = DocumentRecord(application_id="application_x", document_id="document_mixed",
+                            document_type=DocumentType.LETTER, letter_index=1,
+                            source_path=str(pdf), source_relative_path="app/mixed.pdf",
+                            source_sha256=sha256_file(pdf))
+    config = config_for(tmp_path / "configuration").ocr.model_copy(update={"enabled": True})
+    canonical = extract_canonical(record, config, FakeOCR())
+    assert canonical.extraction_status == ValueStatus.FOUND
+    assert canonical.pages[0].extraction_method == "native"
+    assert canonical.pages[1].extraction_method == "ocr"
+    assert canonical.pages[2].extraction_status == ValueStatus.NOT_FOUND
+    assert "blank_page" in canonical.pages[2].quality_flags
+
+    class FailedOCR:
+        def extract(self, page: object, dpi: int):
+            raise RuntimeError("protected text must not enter the log")
+
+    failed = extract_canonical(record, config, FailedOCR())
+    assert failed.extraction_status == ValueStatus.MODEL_FAILED
+    assert "canonical_page_unrecoverable" in failed.pages[1].quality_flags
+
+
+def test_truncated_cv_uses_bounded_section_contracts() -> None:
+    text = "\n".join([
+        "[[PAGE:1]]", "EDUCATION", "EDUCATION|Example University|PhD|Economics|2017|2022",
+        "PUBLICATIONS",
+        *[f"PUBLICATION|Paper {index}|journal_article|2024|Example Journal|Applicant Alice"
+          for index in range(10)],
+    ])
+    document = privacy_document(text)
+    document.document_type = DocumentType.CV
+
+    class TruncatingBackend:
+        def __init__(self):
+            self.mock = MockBackend()
+            self.tasks = []
+
+        def complete(self, task, prompt, schema, max_tokens):
+            self.tasks.append((task, max_tokens))
+            source = prompt.rsplit("SOURCE_TEXT:\n", 1)[-1]
+            if task == "cv":
+                raise InferenceError("model_output_truncated")
+            full = self.mock._cv(source)
+            if task == "cv_education":
+                payload = {"section": full["sections"]["education"], "mentions": []}
+            elif task == "cv_employment":
+                payload = {"section": full["sections"]["employment"], "mentions": []}
+            elif task == "cv_publications":
+                payload = {"section": full["sections"]["publications"], "mentions": []}
+            else:
+                payload = {"research_fields": [], "research_methods": [], "mentions": []}
+            return ModelResponse(payload=payload, latency_seconds=0.01)
+
+        def close(self):
+            return None
+
+    backend = TruncatingBackend()
+    result, metrics = extract_cv(document, backend, 16384, 0, 32768)
+    assert len(result.publications.items) == 10
+    assert metrics["section_fallback_chunk_count"] > 0
+    assert metrics["publication_batch_count"] > 0
+    assert all(limit <= 8192 for task, limit in backend.tasks if task != "cv")
+
+
+def test_schema_aware_package_scan_ignores_phone_like_opaque_ids(tmp_path: Path) -> None:
+    package = tmp_path / "candidate"
+    package.mkdir()
+    (package / "cv_profiles.jsonl").write_text(json.dumps({
+        "document_id": "document_947a3682734684b5c57f",
+        "application_id": "application_12345678901234567890",
+        "person_id": "person_12345678901234567890",
+        "research_fields": [],
+    }) + "\n", encoding="utf-8")
+    assert _package_leaks(package, []) == []
+
+
+def test_invalid_controlled_optional_value_is_suppressed() -> None:
+    field = ExtractedField(value="555-111-2222", status=ValueStatus.FOUND,
+                           model_confidence=0.91)
+    public = public_controlled_field(field, "position_type")
+    assert public["value"] is None
+    assert public["status"] == "uncertain"
+    assert "invalid_controlled_value_suppressed" in public["validation_flags"]
+
+
+def test_ambiguous_ner_requires_explicit_local_decision(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    _, documents = inventory_stage(config)
+    process_stage(config)
+    record = documents[0]
+    store = CheckpointStore(config.output_root / "protected", config.cache_fingerprint())
+    checkpoint = store.load_metadata(record)
+    artifact = store.load_artifact(checkpoint, "privacy")
+    assert isinstance(artifact, dict)
+    privacy = PrivacyResult.model_validate(artifact["privacy"])
+    privacy.release_status = "review_required"
+    privacy.reason_codes = ["ambiguous_ner_candidate_review"]
+    privacy.findings = [PrivacyFinding(
+        finding_type="ambiguous_ner_candidate", start=0, end=1, detector="model",
+        grounded=True, disposition="review_required", model_confidence=0.8)]
+    privacy.content_sha256 = None
+    artifact["privacy"] = privacy.model_dump(mode="json")
+    store.save_artifact(checkpoint, "privacy", artifact,
+                        checkpoint.stage_fingerprints["privacy"])
+
+    decisions = tmp_path / "ner_decisions.csv"
+    decisions.write_text(
+        "document_id,decision,reviewer_note\n"
+        f"{record.document_id},preserve,reviewed locally\n", encoding="utf-8")
+    result = apply_ner_review_stage(config, decisions)
+    assert result["applied"]["preserve"] == 1
+    updated = store.load_artifact(store.load_metadata(record), "privacy")
+    assert PrivacyResult.model_validate(updated["privacy"]).release_status == \
+        "validated_candidate"
 
 
 def test_end_to_end_candidate_review_release_and_no_leak(tmp_path: Path) -> None:
@@ -298,6 +433,22 @@ def test_resume_reuses_released_checkpoints(tmp_path: Path) -> None:
     assert first["released_document_count"] == second["released_document_count"]
     assert mtimes == {path: path.stat().st_mtime_ns for path in
                       (config.output_root / "protected" / "checkpoints").rglob("semantic.json")}
+
+
+def test_compatible_legacy_canonical_is_promoted_without_model_rerun(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    _, documents = inventory_stage(config)
+    process_stage(config)
+    semantic_mtimes = {path: path.stat().st_mtime_ns for path in
+                       (config.output_root / "protected/checkpoints").rglob("semantic.json")}
+    store = CheckpointStore(config.output_root / "protected", config.cache_fingerprint())
+    for record in documents:
+        checkpoint = store.load_metadata(record)
+        checkpoint.stage_fingerprints["canonical"] = "compatible_legacy_version"
+        store.save_metadata(checkpoint)
+    process_stage(config, retry_failed=True)
+    assert semantic_mtimes == {path: path.stat().st_mtime_ns for path in
+                              (config.output_root / "protected/checkpoints").rglob("semantic.json")}
 
 
 def test_v1_registry_import_is_explicit_and_idempotent(tmp_path: Path) -> None:

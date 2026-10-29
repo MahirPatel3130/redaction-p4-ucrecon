@@ -118,6 +118,16 @@ def _native_blocks(page: Any, page_number: int) -> list[
     return rows
 
 
+def _visually_blank(page: Any, native_text: str) -> bool:
+    """Conservatively distinguish a genuinely empty page from an OCR failure."""
+    if native_text.strip() or page.get_images(full=True):
+        return False
+    try:
+        return not page.get_drawings()
+    except Exception:
+        return False
+
+
 def extract_canonical(record: DocumentRecord, config: OCRConfig,
                       ocr: OCRBackend | None = None) -> CanonicalDocument:
     import pymupdf
@@ -135,7 +145,8 @@ def extract_canonical(record: DocumentRecord, config: OCRConfig,
             page_number = page_index + 1
             native_text = page.get_text("text", sort=True)
             flags = _native_quality(native_text, page, config)
-            use_ocr = bool(flags) and config.enabled
+            blank_page = _visually_blank(page, native_text)
+            use_ocr = bool(flags) and config.enabled and not blank_page
             method = "native"
             block_rows: list[tuple[str, tuple[float, float, float, float] | None, float | None]]
             if use_ocr:
@@ -145,10 +156,14 @@ def extract_canonical(record: DocumentRecord, config: OCRConfig,
                     except ExtractionError:
                         ocr = None
                 if ocr is not None:
-                    block_rows = ocr.extract(page, config.dpi)
-                    method = "ocr"
-                    if not block_rows:
-                        flags.append("ocr_returned_no_text")
+                    try:
+                        block_rows = ocr.extract(page, config.dpi)
+                        method = "ocr"
+                        if not block_rows:
+                            flags.append("ocr_returned_no_text")
+                    except Exception:
+                        block_rows = _native_blocks(page, page_number)
+                        flags.append("ocr_page_failed")
                 else:
                     block_rows = _native_blocks(page, page_number)
                     flags.append("ocr_unavailable")
@@ -187,17 +202,25 @@ def extract_canonical(record: DocumentRecord, config: OCRConfig,
                     or block.extraction_confidence < config.minimum_ocr_confidence
                     for block in blocks):
                 flags.append("ocr_below_confidence")
-            unusable = (not page_text.strip() or "ocr_unavailable" in flags
-                        or "ocr_below_confidence" in flags)
-            status = ValueStatus.MODEL_FAILED if unusable else ValueStatus.FOUND
+            if blank_page:
+                flags = [flag for flag in flags if flag != "insufficient_native_text"]
+                flags.append("blank_page")
+                unusable = False
+                status = ValueStatus.NOT_FOUND
+            else:
+                unusable = (not page_text.strip() or "ocr_unavailable" in flags
+                            or "ocr_page_failed" in flags or "ocr_returned_no_text" in flags
+                            or "ocr_below_confidence" in flags)
+                status = ValueStatus.MODEL_FAILED if unusable else ValueStatus.FOUND
             if status == ValueStatus.MODEL_FAILED:
-                flags.append("page_text_unavailable")
+                flags.extend(("page_text_unavailable", "canonical_page_unrecoverable"))
             pages.append(CanonicalPage(
                 page=page_number,
                 text=page_text,
                 document_start=page_start_global,
                 document_end=page_end_global,
-                extraction_method=method if page_text.strip() else "failed",
+                extraction_method=("native" if blank_page else
+                                   (method if page_text.strip() else "failed")),
                 extraction_status=status,
                 quality_flags=sorted(set(flags)),
                 blocks=blocks,

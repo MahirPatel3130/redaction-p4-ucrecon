@@ -5,6 +5,7 @@ import logging
 import os
 import statistics
 import time
+import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from .inference import create_backend
 from .inventory import build_inventory
 from .models import (
     ApplicationRecord, CVExtraction, CanonicalDocument, DocumentRecord, DocumentType,
-    LetterExtraction, PrivacyResult,
+    LetterExtraction, PrivacyResult, ValueStatus,
 )
 from .ner import create_ner_backend
 from .privacy import apply_replacements, validate_privacy
@@ -32,7 +33,7 @@ from .registry import EntityRegistry
 from .semantic import extract_cv, extract_letter
 from .util import (
     atomic_json, atomic_write, ensure_private_tree, fingerprint, read_json, sha256_file,
-    write_csv, write_jsonl,
+    sha256_bytes, write_csv, write_jsonl,
 )
 
 
@@ -99,7 +100,7 @@ def load_inventory(config: PipelineConfig) -> tuple[list[ApplicationRecord], lis
 
 
 def _extraction_fingerprint(config: PipelineConfig, record: DocumentRecord) -> str:
-    return stage_fingerprint("canonical_text_v2", record.source_sha256,
+    return stage_fingerprint("canonical_text_v3_page_recovery_1", record.source_sha256,
                              config.ocr.model_dump(mode="json"))
 
 
@@ -112,6 +113,14 @@ def extract_stage(config: PipelineConfig, retry_failed: bool = False) -> list[Ca
         checkpoint = store.load_metadata(record)
         stage_fp = _extraction_fingerprint(config, record)
         cached = store.load_artifact(checkpoint, "canonical", CanonicalDocument, stage_fp)
+        if cached is None:
+            compatible = store.load_artifact(checkpoint, "canonical", CanonicalDocument)
+            if (compatible is not None and compatible.extraction_status == ValueStatus.FOUND
+                    and all(page.extraction_status != ValueStatus.MODEL_FAILED
+                            for page in compatible.pages)):
+                checkpoint.stage_fingerprints["canonical"] = stage_fp
+                store.save_metadata(checkpoint)
+                cached = compatible
         if cached is not None and (not retry_failed or cached.extraction_status.value != "model_failed"):
             return cached
         started = time.monotonic()
@@ -199,9 +208,14 @@ def process_stage(config: PipelineConfig, retry_failed: bool = False) -> dict[st
     def semantic_one(record: DocumentRecord) -> tuple[str, CVExtraction | LetterExtraction,
                                                        dict[str, Any]] | None:
         canonical = canonicals.get(record.document_id)
-        if canonical is None or canonical.extraction_status.value == "model_failed":
+        if canonical is None:
             return None
         checkpoint = store.load_metadata(record)
+        if canonical.extraction_status.value == "model_failed":
+            store.fail(checkpoint, "semantic", "canonical_page_unrecoverable")
+            LOG.error("Semantic extraction blocked document_id=%s code=%s",
+                      record.document_id, "canonical_page_unrecoverable")
+            return None
         stage_fp = _semantic_fingerprint(config, canonical)
         model_type = CVExtraction if record.document_type == DocumentType.CV else LetterExtraction
         cached = store.load_artifact(checkpoint, "semantic", model_type, stage_fp)
@@ -544,6 +558,58 @@ def export_candidate_stage(config: PipelineConfig) -> Path:
         return package
     finally:
         registry.close()
+
+
+def apply_ner_review_stage(config: PipelineConfig, decisions: Path) -> dict[str, Any]:
+    """Apply explicit document-level decisions to ambiguous NER findings only."""
+    with decisions.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    allowed = {"preserve", "withhold"}
+    parsed: dict[str, str] = {}
+    for row in rows:
+        document_id = str(row.get("document_id", "")).strip()
+        decision = str(row.get("decision", "")).strip().casefold()
+        if not document_id or decision not in allowed or document_id in parsed:
+            raise ContractError("invalid_ner_review_decisions")
+        parsed[document_id] = decision
+
+    _, documents = load_inventory(config)
+    records = {row.document_id: row for row in documents}
+    store = CheckpointStore(config.output_root / "protected", config.cache_fingerprint())
+    applied = {"preserve": 0, "withhold": 0}
+    for document_id, decision in parsed.items():
+        record = records.get(document_id)
+        if record is None:
+            raise ContractError("unknown_ner_review_document")
+        checkpoint = store.load_metadata(record)
+        artifact = store.load_artifact(checkpoint, "privacy")
+        if not isinstance(artifact, dict):
+            raise ContractError("ner_review_privacy_artifact_missing")
+        privacy = PrivacyResult.model_validate(artifact["privacy"])
+        if privacy.release_status != "review_required" or not any(
+                row.disposition == "review_required" for row in privacy.findings):
+            raise ContractError("ner_review_document_not_ambiguous")
+        if decision == "preserve":
+            privacy.release_status = "validated_candidate"
+            privacy.reason_codes = ["human_ner_review_preserved"]
+            privacy.findings = [row.model_copy(update={"disposition": "advisory"})
+                                for row in privacy.findings]
+            privacy.advisory_count += len(privacy.findings)
+            privacy.content_sha256 = sha256_bytes(
+                str(artifact.get("deidentified_text", "")).encode("utf-8"))
+        else:
+            privacy.release_status = "withheld"
+            privacy.reason_codes = ["human_ner_review_withheld"]
+            privacy.content_sha256 = None
+        artifact["privacy"] = privacy.model_dump(mode="json")
+        stage_fp = checkpoint.stage_fingerprints.get("privacy")
+        if not stage_fp:
+            raise ContractError("ner_review_privacy_fingerprint_missing")
+        store.save_artifact(checkpoint, "privacy", artifact, stage_fp)
+        atomic_json(config.output_root / "protected" / "qa_reports" /
+                    f"{document_id}.json", privacy)
+        applied[decision] += 1
+    return {"decision_count": len(parsed), "applied": applied}
 
 
 def finalize_review_stage(config: PipelineConfig, decisions: Path) -> dict[str, Any]:

@@ -249,3 +249,30 @@ quality; plus documentation and checksums. Original values, paths, filenames, ev
 geometry, mappings, and model responses remain protected.
 
 See [architecture](docs/architecture.md) and [benchmark design](docs/benchmark.md).
+
+## Targeted incomplete-document repair
+
+`resume` preserves compatible completed canonical, semantic, and privacy artifacts. It retries
+failed pages with configured local OCR, labels unrecoverable pages
+`canonical_page_unrecoverable`, and uses bounded section-specific extraction when a dense CV
+truncates the full CV contract. Blank pages are recorded separately and do not fail a document.
+
+Ambiguous NER findings are never automatically approved. Reviewers may provide a protected local
+CSV with one explicit document-level decision per reviewed document:
+
+```csv
+document_id,decision,reviewer_note
+document_opaque_id,preserve,Reviewed all ambiguous spans
+document_other_id,withhold,Identity remains ambiguous
+```
+
+Valid decisions are `preserve` and `withhold`. Apply them inside the protected environment:
+
+```bash
+academic-pipeline-v2 apply-ner-review \
+  --config /protected/v2/config.yaml \
+  --decisions /protected/v2/ner_review_decisions.csv
+```
+
+Then rerun candidate export. The review file and protected evidence are never copied into the
+researcher package.

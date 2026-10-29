@@ -43,6 +43,37 @@ def public_field(field: Any, transform: Any = None) -> dict[str, Any]:
             "validation_flags": field.validation_flags}
 
 
+CONTROLLED_VALUES = {
+    "degree_type": {"associate", "bachelor", "bachelors", "ba", "b_a", "bs", "b_s",
+                    "master", "masters", "ma", "m_a", "ms", "m_s", "mba", "mph", "jd",
+                    "md", "phd", "ph_d", "doctorate", "postdoctoral", "other"},
+    "job_category": {"academic_faculty", "academic_staff", "research", "teaching",
+                     "administration", "industry", "government", "nonprofit", "student",
+                     "postdoctoral", "other"},
+    "position_type": {"faculty", "staff", "research", "teaching", "administrative",
+                      "postdoctoral", "student", "industry", "government", "nonprofit",
+                      "other"},
+    "publication_type": {"journal_article", "conference_paper", "book", "book_chapter",
+                         "working_paper", "preprint", "report", "thesis", "dissertation",
+                         "review", "editorial", "other"},
+}
+
+
+def public_controlled_field(field: Any, kind: str) -> dict[str, Any]:
+    """Suppress malformed optional categories without discarding protected evidence."""
+    result = public_field(field)
+    value = result["value"]
+    normalized = normalized_key(str(value)).replace(" ", "_") if value is not None else None
+    invalid = bool(value is not None and (
+        deterministic_spans(str(value)) or normalized not in CONTROLLED_VALUES[kind]))
+    if invalid:
+        result["value"] = None
+        result["status"] = "uncertain"
+        result["validation_flags"] = sorted(set(
+            list(result["validation_flags"]) + ["invalid_controlled_value_suppressed"]))
+    return result
+
+
 def public_cv(extraction: CVExtraction, registry: EntityRegistry,
               applicant_id: str) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     people_by_name = {
@@ -57,7 +88,8 @@ def public_cv(extraction: CVExtraction, registry: EntityRegistry,
         education.append({
             "education_id": item.item_id, "application_id": extraction.application_id,
             "document_id": extraction.document_id, "person_id": applicant_id,
-            "organization_id": org_id, "degree_type": public_field(item.degree_type),
+            "organization_id": org_id,
+            "degree_type": public_controlled_field(item.degree_type, "degree_type"),
             "academic_field": public_field(item.field),
             "start_period": public_field(item.start_year, five_year_bucket),
             "end_period": public_field(item.end_year, five_year_bucket),
@@ -71,8 +103,9 @@ def public_cv(extraction: CVExtraction, registry: EntityRegistry,
         employment.append({
             "employment_id": item.item_id, "application_id": extraction.application_id,
             "document_id": extraction.document_id, "person_id": applicant_id,
-            "organization_id": org_id, "job_category": public_field(item.job_category),
-            "position_type": public_field(item.position_type),
+            "organization_id": org_id,
+            "job_category": public_controlled_field(item.job_category, "job_category"),
+            "position_type": public_controlled_field(item.position_type, "position_type"),
             "start_period": public_field(item.start_date, five_year_bucket),
             "end_period": public_field(item.end_date, five_year_bucket),
             "item_model_confidence": item.item_model_confidence,
@@ -90,7 +123,8 @@ def public_cv(extraction: CVExtraction, registry: EntityRegistry,
             "publication_id": publication_id, "application_id": extraction.application_id,
             "document_id": extraction.document_id, "work_id": work_id,
             "venue_organization_id": venue_id,
-            "publication_type": public_field(item.publication_type),
+            "publication_type": public_controlled_field(
+                item.publication_type, "publication_type"),
             "publication_year": public_field(item.year),
             "item_model_confidence": item.item_model_confidence,
         })
@@ -147,6 +181,11 @@ OPAQUE_ID_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 PLACEHOLDER_PATTERN = re.compile(r"\[\[[^\]]+\]\]")
+ID_FIELDS = {
+    "application_id", "document_id", "entity_id", "person_id", "organization_id",
+    "work_id", "education_id", "employment_id", "publication_id", "relationship_id",
+    "source_id", "target_id", "recommender_person_id", "applicant_person_id",
+}
 
 
 def _alias_present(text: str, alias: str) -> bool:
@@ -224,15 +263,42 @@ def _package_leak_report(root: Path, protected_redactions: list[Any]) -> dict[st
     for path in root.rglob("*"):
         if not path.is_file() or path.name == "manifest.json":
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        masked = re.sub(r"\[\[[^\]]+\]\]", " ", text)
-        # Opaque IDs are deliberately non-sensitive join keys.  Mask every
-        # namespace rather than maintaining a brittle allow-list, and support
-        # both compact hashes and UUID-shaped suffixes.
-        masked = OPAQUE_ID_PATTERN.sub(" ", masked)
         findings: list[str] = []
-        if deterministic_spans(masked):
-            findings.append("deterministic_identifier_in_package")
+        rows: list[Any] = []
+        if path.suffix == ".jsonl":
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.strip():
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        findings.append("invalid_research_jsonl")
+        elif path.suffix == ".json":
+            try:
+                rows.append(json.loads(path.read_text(encoding="utf-8", errors="ignore")))
+            except json.JSONDecodeError:
+                findings.append("invalid_research_json")
+        elif path.suffix == ".csv":
+            with path.open(encoding="utf-8", errors="ignore", newline="") as handle:
+                rows.extend(csv.DictReader(handle))
+
+        def scan(value: Any, key: str | None = None) -> None:
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    scan(child, str(child_key))
+            elif isinstance(value, list):
+                for child in value:
+                    scan(child, key)
+            elif isinstance(value, str) and value:
+                if key in ID_FIELDS:
+                    if not OPAQUE_ID_PATTERN.fullmatch(value):
+                        findings.append("invalid_opaque_join_id")
+                    return
+                masked = PLACEHOLDER_PATTERN.sub(" ", value)
+                if deterministic_spans(masked):
+                    findings.append("deterministic_identifier_in_package")
+
+        for row in rows:
+            scan(row)
 
         # Alias comparison is meaningful for source-preserving narrative prose.
         # Applying it to serialized structured tables confuses permitted semantic

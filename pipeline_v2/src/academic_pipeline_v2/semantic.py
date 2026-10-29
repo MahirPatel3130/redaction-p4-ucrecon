@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from . import SCHEMA_VERSION
 from .detectors import deterministic_spans, section_inventory
+from .errors import InferenceError
 from .extraction import page_for_offset, text_hash
 from .inference import InferenceBackend
 from .models import (
@@ -155,6 +156,27 @@ class RawCV(RawModel):
     mentions: list[RawMention] = Field(default_factory=list)
 
 
+class RawEducationPayload(RawModel):
+    section: RawEducationSection
+    mentions: list[RawMention] = Field(default_factory=list)
+
+
+class RawEmploymentPayload(RawModel):
+    section: RawEmploymentSection
+    mentions: list[RawMention] = Field(default_factory=list)
+
+
+class RawPublicationPayload(RawModel):
+    section: RawPublicationSection
+    mentions: list[RawMention] = Field(default_factory=list)
+
+
+class RawResearchPayload(RawModel):
+    research_fields: list[RawField] = Field(default_factory=list)
+    research_methods: list[RawField] = Field(default_factory=list)
+    mentions: list[RawMention] = Field(default_factory=list)
+
+
 class RawRelationship(RawModel):
     relationship_type: str
     source_start: int
@@ -225,6 +247,50 @@ def _merge_raw_cv(chunks: list[RawCV]) -> RawCV:
         research_methods=[item for chunk in chunks for item in chunk.research_methods],
         mentions=[item for chunk in chunks for item in chunk.mentions],
     )
+
+
+def _section_prompt(section: str, text: str) -> str:
+    return (
+        f"TASK=cv_{section}_extraction\n"
+        f"Extract only {section} data and identifying mentions supported by this CV text. "
+        "Use exact offsets relative to SOURCE_TEXT. Return a compact, complete object matching "
+        "the supplied schema; do not return other CV sections.\n\nSOURCE_TEXT:\n" + text
+    )
+
+
+def _section_specific_cv_chunk(backend: InferenceBackend, chunk: str,
+                               max_tokens: int) -> tuple[RawCV, list[Any]]:
+    """Bounded fallback for a chunk whose full CV contract exhausted generation."""
+    responses: list[Any] = []
+    section_limit = min(max_tokens, 4096)
+    publication_limit = min(max_tokens, 8192)
+    education, attempts = _validated_completion(
+        backend, "cv_education", _section_prompt("education", chunk),
+        RawEducationPayload, section_limit)
+    responses.extend(attempts)
+    employment, attempts = _validated_completion(
+        backend, "cv_employment", _section_prompt("employment", chunk),
+        RawEmploymentPayload, section_limit)
+    responses.extend(attempts)
+    publications, attempts = _validated_completion(
+        backend, "cv_publications", _section_prompt("publications", chunk),
+        RawPublicationPayload, publication_limit)
+    responses.extend(attempts)
+    research, attempts = _validated_completion(
+        backend, "cv_research", _section_prompt("research fields and methods", chunk),
+        RawResearchPayload, section_limit)
+    responses.extend(attempts)
+    return RawCV(
+        sections=RawSections(
+            education=education.section,
+            employment=employment.section,
+            publications=publications.section,
+        ),
+        research_fields=research.research_fields,
+        research_methods=research.research_methods,
+        mentions=(education.mentions + employment.mentions + publications.mentions
+                  + research.mentions),
+    ), responses
 
 
 def _merge_raw_letters(chunks: list[RawLetter]) -> RawLetter:
@@ -539,9 +605,17 @@ def extract_cv(document: CanonicalDocument, backend: InferenceBackend,
     chunks = _chunks(document.text, cv_chunk_chars)
     responses = []
     raw_chunks = []
+    section_fallback_chunks = 0
     for offset, chunk in chunks:
         prompt = CV_PROMPT.format(inventory=json.dumps(inventory, sort_keys=True), text=chunk)
-        validated, attempts = _validated_completion(backend, "cv", prompt, RawCV, max_tokens)
+        try:
+            validated, attempts = _validated_completion(
+                backend, "cv", prompt, RawCV, max_tokens)
+        except InferenceError as exc:
+            if str(exc) != "model_output_truncated":
+                raise
+            validated, attempts = _section_specific_cv_chunk(backend, chunk, max_tokens)
+            section_fallback_chunks += 1
         responses.extend(attempts)
         raw_chunks.append(RawCV.model_validate(_shift_offsets(validated.model_dump(), offset)))
     raw = _merge_raw_cv(raw_chunks)
@@ -563,6 +637,8 @@ def extract_cv(document: CanonicalDocument, backend: InferenceBackend,
                     "output_tokens": sum(row.output_tokens or 0 for row in responses),
                     "inference_seconds": sum(row.latency_seconds for row in responses),
                     "chunk_count": len(chunks),
+                    "section_fallback_chunk_count": section_fallback_chunks,
+                    "publication_batch_count": len(chunks) if section_fallback_chunks else 0,
                     "_raw_responses": [row.payload for row in responses]}
 
 

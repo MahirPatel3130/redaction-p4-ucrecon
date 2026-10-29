@@ -11,7 +11,7 @@ from .audit import build_privacy_audit
 from .evaluation import evaluate_run
 from .exporter import validate_candidate_package
 from .pipeline import (
-    export_candidate_stage, extract_stage, finalize_review_stage, inventory_stage,
+    apply_ner_review_stage, export_candidate_stage, extract_stage, finalize_review_stage, inventory_stage,
     process_stage, release_stage, status_stage,
 )
 from .registry import EntityRegistry
@@ -35,6 +35,9 @@ def parser() -> argparse.ArgumentParser:
     finalize = commands.add_parser("finalize-review")
     finalize.add_argument("--config", type=Path, required=True)
     finalize.add_argument("--decisions", type=Path, required=True)
+    ner_review = commands.add_parser("apply-ner-review")
+    ner_review.add_argument("--config", type=Path, required=True)
+    ner_review.add_argument("--decisions", type=Path, required=True)
     migrate = commands.add_parser("migrate-v1-registry")
     migrate.add_argument("--config", type=Path, required=True)
     migrate.add_argument("--v1-registry", type=Path, required=True)
@@ -88,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
                                       else release_stage(config))}
         elif args.command == "finalize-review":
             result = finalize_review_stage(config, args.decisions)
+        elif args.command == "apply-ner-review":
+            result = apply_ner_review_stage(config, args.decisions)
         elif args.command == "migrate-v1-registry":
             registry = EntityRegistry(config.state_root / "registry.sqlite")
             try:
