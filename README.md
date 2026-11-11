@@ -1,5 +1,8 @@
 # Gemma 4 CV redaction prototype
 
+For the complete project history, current V2 architecture, restricted-machine state, operational
+paths, known issues, and continuation instructions, see [PROJECT_HANDOFF.md](PROJECT_HANDOFF.md).
+
 This offline prototype renders CV PDF pages, asks Gemma 4 Vision for sensitive-region boxes,
 snaps those boxes to exact PDF word geometry, adds deterministic email/phone/URL/DOI matches,
 writes structured JSON, and permanently removes content in those boxes from a copied PDF.
